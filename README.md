@@ -3,6 +3,12 @@
 **Find redundant music, compare drives, dig playlists.** Read-only triage for
 the boxes where music actually lives.
 
+> this is a wicked tool for that lazy-dumper, like me, that dumps a bunch of
+> redundant stuff onto a drive over time and then forgets which is the right
+> one, or, what to restore from.
+>
+> — machiner
+
 brenda is three tools in one keyboard-friendly command:
 
 | command | what it does |
@@ -107,6 +113,14 @@ in your browser.
   other distros' commands are printed on request.
 - Any DE or WM — brenda is a terminal tool; the only "GUI" is `xdg-open`
   handing the report to your browser
+
+## Coming in v1.1 — the decision layer
+
+The report tells you what's there; v1.1 gives the report buttons. Import
+new-to-you tracks into a local directory of your choice, merge collections
+and delete the leftovers, quarantine (never plain delete) anything redundant
+with a full undo manifest — every action dry-run first — and a re-scan that
+refreshes the report and the playlists when you're done.
 
 ## Privacy
 
