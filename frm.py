@@ -602,6 +602,13 @@ def dir_short(path, root):
     return os.path.relpath(path, root) if os.path.commonpath([root, path]) else path
 
 
+def loc(path, root):
+    """Display form of a collection path: drive name + path relative to the
+    scan root. Display ONLY — dir_short() stays the export-naming scheme."""
+    drive = os.path.basename(root.rstrip(os.sep)) or "root"
+    return f"{drive}: {dir_short(path, root)}"
+
+
 # ---- JSON ----
 
 def render_json(data, outpath):
@@ -646,13 +653,13 @@ def render_markdown(data, outpath, root):
         L.append("## Whole-directory mirrors (exact copies)")
         L.append("")
         for a, b in data["mirror_pairs"]:
-            L.append(f"- `{dir_short(a, root)}` ≡ `{dir_short(b, root)}`")
+            L.append(f"- `{loc(a, root)}` ≡ `{loc(b, root)}`")
         L.append("")
     if data["twins"]:
         L.append("## Twins (~100% same songs, different format)")
         L.append("")
         for a, b, pct in data["twins"]:
-            L.append(f"- `{dir_short(a, root)}` ⇄ `{dir_short(b, root)}` "
+            L.append(f"- `{loc(a, root)}` ⇄ `{loc(b, root)}` "
                      f"({pct:.0f}% same songs — likely the same library "
                      f"re-ripped/transcoded)")
         L.append("")
@@ -661,7 +668,7 @@ def render_markdown(data, outpath, root):
     rows = []
     for d in dirs:
         rows.append([
-            f"`{dir_short(d['path'], root)}`", d["kind"], d["files"], d["dirs"],
+            f"`{loc(d['path'], root)}`", d["kind"], d["files"], d["dirs"],
             d.get("top_dirs", ""), d["audio_files"], d["playlists"],
             d["hidden"], fmt_bytes(d["size_bytes"]), d["kind_note"],
         ])
@@ -676,7 +683,7 @@ def render_markdown(data, outpath, root):
         rows = []
         for p in sorted(pc):
             v = pc[p]
-            rows.append([f"`{dir_short(p, root)}`", v["audio_files"],
+            rows.append([f"`{loc(p, root)}`", v["audio_files"],
                          v["audio_bytes"], f"{v['unique_files']:,}",
                          f"{v['unique_ratio']*100:.0f}%"])
         L.append(md_table(["Collection", "audio files", "audio bytes",
@@ -688,12 +695,12 @@ def render_markdown(data, outpath, root):
         cols = list(data["song"]["matrix"])
         rows = []
         for a in cols:
-            row = [f"`{dir_short(a, root)}`"]
+            row = [f"`{loc(a, root)}`"]
             for b in cols:
                 v = data["song"]["matrix"][a][b]
                 row.append(f"{v[0]:.0f}%" if v else "—")
             rows.append(row)
-        L.append(md_table(["collection \\ in"] + [dir_short(c, root) for c in cols], rows))
+        L.append(md_table(["collection \\ in"] + [loc(c, root) for c in cols], rows))
         L.append("")
         L.append("*(row % of songs also present in column; heuristic, filename-based)*")
         L.append("")
@@ -792,7 +799,7 @@ def render_html(data, outpath, root):
     for d in dirs:
         kind = d["kind"]
         rows += (f'<tr><td class="loc" title="{esc(d["path"])}">'
-                 f'<code>{esc(dir_short(d["path"], root))}</code></td>'
+                 f'<code>{esc(loc(d["path"], root))}</code></td>'
                  f'<td><span class="badge" style="background:{KIND_COLOR[kind]}">'
                  f'{KIND_BADGE[kind]}</span></td>'
                  f'<td class="num">{d["dirs"]}</td>'
@@ -809,8 +816,8 @@ def render_html(data, outpath, root):
         mirrors = ('<div class="warn"><b>Whole-directory mirror copies '
                    '(identical file tree + sizes, verified):</b><br>')
         for a, b in data["mirror_pairs"]:
-            mirrors += (f'<code>{esc(dir_short(a, root))}</code> ≡ '
-                        f'<code>{esc(dir_short(b, root))}</code><br>')
+            mirrors += (f'<code>{esc(loc(a, root))}</code> ≡ '
+                        f'<code>{esc(loc(b, root))}</code><br>')
         if data["byte"] and "mirrors_content_verified" in data["byte"]:
             mirrors += ("<br>Content hashes of these mirror pairs were compared "
                         "and match exactly.")
@@ -823,8 +830,8 @@ def render_html(data, outpath, root):
                       '<b>Twins — ~100% song overlap but not byte-identical '
                       '(same library, different format):</b><br>')
         for a, b, pct in data["twins"]:
-            twins_html += (f'<code>{esc(dir_short(a, root))}</code> ⇄ '
-                           f'<code>{esc(dir_short(b, root))}</code> '
+            twins_html += (f'<code>{esc(loc(a, root))}</code> ⇄ '
+                           f'<code>{esc(loc(b, root))}</code> '
                            f'({pct:.0f}% same songs)<br>')
         twins_html += "</div>"
 
@@ -879,7 +886,7 @@ def render_html(data, outpath, root):
                           f'({v["unique_ratio"]*100:.0f}% of this collection)</td></tr>')
         cards += f"""
     <div class="card">
-      <h3>{esc(dir_short(d["path"], root))}
+      <h3>{esc(loc(d["path"], root))}
           <span class="dim">{fmt_bytes(d["size_bytes"])}</span></h3>
       <p class="sub">{esc(d["kind_note"])}</p>
       <table class="stats">
@@ -900,14 +907,14 @@ def render_html(data, outpath, root):
     matrix = ""
     if data["song"]:
         cols = list(data["song"]["matrix"])
-        head = "".join(f'<th class="num">{esc(dir_short(c, root))}</th>' for c in cols)
+        head = "".join(f'<th class="num">{esc(loc(c, root))}</th>' for c in cols)
         body = ""
         for a in cols:
             cells = ""
             for b in cols:
                 v = data["song"]["matrix"][a][b]
                 cells += f'<td class="num">{v[0]:.0f}%</td>' if v else '<td class="num">—</td>'
-            body += (f'<tr><td><b>{esc(dir_short(a, root))}</b></td>{cells}</tr>')
+            body += (f'<tr><td><b>{esc(loc(a, root))}</b></td>{cells}</tr>')
         matrix = (f'<h2>Song-level overlap matrix</h2>'
                   f'<p class="sub">% of the <i>row</i> collection&rsquo;s songs '
                   f'(normalized artist+title, format-blind) that also exist in '
@@ -926,7 +933,7 @@ def render_html(data, outpath, root):
             bc = f'{b["unique_ratio"]*100:.0f}% unique' if b else "—"
             sc = (f'{s["only_here"]:,} unique / {s["songs"]:,}'
                   if s else "—")
-            ledger_rows += (f'<tr><td><b>{esc(dir_short(p, root))}</b></td>'
+            ledger_rows += (f'<tr><td><b>{esc(loc(p, root))}</b></td>'
                             f'<td class="num">{fmt_bytes(d["audio_bytes"])}</td>'
                             f'<td class="num">{bc}</td>'
                             f'<td class="num">{sc}</td></tr>')
@@ -1165,6 +1172,36 @@ def self_test():
 # main
 # --------------------------------------------------------------------------
 
+def export_run(data, root, outdir):
+    """Write one scan run: files-*.txt, hashes.tsv, report.{json,md,html}.
+    data is the analyze() dict; bulky internals are stripped from the JSON.
+    Returns the HTML path. Used by frm.main() and by brenda serve's rescan —
+    CLI behavior unchanged."""
+    # strip bulky internals before JSON dump; keep per-dir file lists and the
+    # hash table as separate plain-text files alongside the report
+    data_for_json = json.loads(json.dumps(data))
+    if data_for_json["byte"]:
+        data_for_json["byte"].pop("hash_by_path", None)
+    dirs_export = []
+    for d in data_for_json["dirs"]:
+        fl = d["audio_files_list"]
+        rel = dir_short(d["path"], root).replace(os.sep, "__")
+        with open(os.path.join(outdir, f"files-{rel}.txt"), "w") as ff:
+            ff.write("\n".join(fl))
+        d.pop("audio_files_list", None)
+        dirs_export.append(d)
+    data_for_json["dirs"] = dirs_export
+
+    if data["byte"]:
+        with open(os.path.join(outdir, "hashes.tsv"), "w") as hf:
+            for fp, h in sorted(data["byte"]["hash_by_path"].items()):
+                hf.write(f"{h}\t{fp}\n")
+
+    render_json(data_for_json, os.path.join(outdir, "report.json"))
+    render_markdown(data, os.path.join(outdir, "report.md"), root)
+    return render_html(data, os.path.join(outdir, "report.html"), root)
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog="frm", description=__doc__.splitlines()[1],
@@ -1253,30 +1290,7 @@ def main():
     drive = os.path.basename(root.rstrip(os.sep)) or "root"
     outdir = os.path.join(args.outdir, "runs", f"{stamp}-{drive}")
     os.makedirs(outdir, exist_ok=True)
-
-    # strip bulky internals before JSON dump; keep per-dir file lists and the
-    # hash table as separate plain-text files alongside the report
-    data_for_json = json.loads(json.dumps(data))
-    if data_for_json["byte"]:
-        data_for_json["byte"].pop("hash_by_path", None)
-    dirs_export = []
-    for d in data_for_json["dirs"]:
-        fl = d["audio_files_list"]
-        rel = dir_short(d["path"], root).replace(os.sep, "__")
-        with open(os.path.join(outdir, f"files-{rel}.txt"), "w") as ff:
-            ff.write("\n".join(fl))
-        d.pop("audio_files_list", None)
-        dirs_export.append(d)
-    data_for_json["dirs"] = dirs_export
-
-    if data["byte"]:
-        with open(os.path.join(outdir, "hashes.tsv"), "w") as hf:
-            for fp, h in sorted(data["byte"]["hash_by_path"].items()):
-                hf.write(f"{h}\t{fp}\n")
-
-    render_json(data_for_json, os.path.join(outdir, "report.json"))
-    render_markdown(data, os.path.join(outdir, "report.md"), root)
-    html_path = render_html(data, os.path.join(outdir, "report.html"), root)
+    html_path = export_run(data, root, outdir)
 
     # latest symlink
     try:

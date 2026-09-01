@@ -206,7 +206,7 @@ def load_run(rundir):
         else:               # fresh run export always writes these; be safe
             files = d.get("audio_files_list", [])
         colls.append({"path": d["path"], "kind": d["kind"],
-                      "short": frm.dir_short(d["path"], root), "files": files})
+                      "short": frm.loc(d["path"], root), "files": files})
 
     hashes = {}
     hp = os.path.join(rundir, "hashes.tsv")
@@ -225,15 +225,29 @@ def load_run(rundir):
 # the diff
 # --------------------------------------------------------------------------
 
-def compare_run(run, index):
+def compare_run(run, index, only_roots=None):
+    """Diff the run against index sections. only_roots restricts the diff to
+    those roots (scan-to-scan compares); None = every indexed root except
+    the run's own. Returns results with 'against' = the roots actually used."""
+    run_root = os.path.realpath(run["root"])
+    only = ({os.path.realpath(r) for r in only_roots}
+            if only_roots else None)
     local_md5 = {}
     local_keys = {}
-    for fp, rec in all_files(index):
-        h = rec.get("md5")
-        if h:
-            local_md5.setdefault(h, []).append(fp)
-        if rec.get("key"):
-            local_keys.setdefault(rec["key"], []).append(fp)
+    used_roots = []
+    for root, sec in index["roots"].items():
+        rr = os.path.realpath(root)
+        if rr == run_root:
+            continue        # never match a drive against its own index section
+        if only and rr not in only:
+            continue
+        used_roots.append(root)
+        for fp, rec in sec.get("files", {}).items():
+            h = rec.get("md5")
+            if h:
+                local_md5.setdefault(h, []).append(fp)
+            if rec.get("key"):
+                local_keys.setdefault(rec["key"], []).append(fp)
 
     per_coll = []
     totals = {"exact_files": 0, "exact_bytes": 0, "variant_files": 0,
@@ -276,7 +290,8 @@ def compare_run(run, index):
             totals["new_bytes"] += entry["new_bytes"]
         else:
             entry["new_bytes"] = 0
-    return {"per_collection": per_coll, "totals": totals, "new_master": new_master}
+    return {"per_collection": per_coll, "totals": totals,
+            "new_master": new_master, "against": used_roots}
 
 
 # --------------------------------------------------------------------------
@@ -289,7 +304,7 @@ def render_json(results, run, index, outpath):
                  "run_hashed": run["hashed"],
                  "index_built": index.get("built"),
                  "index_files": index_count(index),
-                 "index_roots": sorted(index["roots"]),
+                 "index_roots": sorted(results.get("against", index["roots"])),
                  "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                  "version": frm.VERSION},
         "totals": results["totals"],
@@ -452,6 +467,10 @@ def run_cli(argv=None):
                     metavar="ROOT",
                     help="local root(s) to index (default: your home dir); "
                          "repeatable")
+    ap.add_argument("--against", action="append", default=None,
+                    metavar="ROOT",
+                    help="diff only against this root's index section "
+                         "(scan-to-scan compare); repeatable")
     ap.add_argument("--refresh", action="store_true",
                     help="re-hash all indexed files, ignoring the cache")
     ap.add_argument("--workers", type=int, default=min(os.cpu_count() or 2, 8))
@@ -467,6 +486,8 @@ def run_cli(argv=None):
                          f"(brenda scan <drive>)")
 
     roots = args.local or [os.path.expanduser("~")]
+    if args.against:
+        roots = roots + [r for r in args.against if r not in roots]
     for r in roots:
         if not os.path.isdir(r):
             raise SystemExit(f"not a directory: {r}")
@@ -479,7 +500,7 @@ def run_cli(argv=None):
           file=sys.stderr)
 
     run = load_run(run_dir)
-    results = compare_run(run, index)
+    results = compare_run(run, index, only_roots=args.against)
     t = results["totals"]
     print(f"compare: {t['run_files']:,} on drive -> "
           f"{t['new_files']:,} new / {t['exact_files']:,} exact / "
@@ -605,6 +626,17 @@ def self_test():
         os.remove(os.path.join(loc, "Alpha", "03 - Local Only.mp3"))
         index5, stats5 = build_index([home], idx_file, 2, quiet=True)
         check("deleted file pruned", stats5["files"] == 3)
+
+        # --- own-root exclusion: a drive never matches itself --------------
+        # index the run's own drive too, then re-compare: numbers must not
+        # change (with the old whole-index diff, this would be 4/4 exact)
+        build_index([drive], idx_file, 2, quiet=True)
+        index_own, _st = _load_index(idx_file), None
+        index_own = _load_index(idx_file)
+        results_own = compare_run(run, index_own)
+        check("own root excluded from diff",
+              results_own["totals"]["exact_files"] == 1
+              and results_own["totals"]["new_files"] == 2)
 
         # renders don't blow up
         rj = render_json(results, run, index, os.path.join(rundir, "compare.json"))

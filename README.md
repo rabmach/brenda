@@ -114,13 +114,40 @@ in your browser.
 - Any DE or WM — brenda is a terminal tool; the only "GUI" is `xdg-open`
   handing the report to your browser
 
-## Coming in v1.1 — the decision layer
+## The dashboard — `brenda serve`
 
-The report tells you what's there; v1.1 gives the report buttons. Import
-new-to-you tracks into a local directory of your choice, merge collections
-and delete the leftovers, quarantine (never plain delete) anything redundant
-with a full undo manifest — every action dry-run first — and a re-scan that
-refreshes the report and the playlists when you're done.
+```sh
+brenda serve        # one command; opens the dashboard in your browser
+```
+
+One page, always open: every scan run in the data home, newest first, each
+collection with its **compare numbers against everything brenda has ever
+indexed** — plus a dropdown per run: *compare to …* any other drive's scan,
+or the local home, or everything. The page re-checks itself every few
+seconds: keep scanning drives, leave the browser open — new runs appear on
+their own. Actions need the drive mounted (unplugged runs show it and their
+cached compare numbers stay visible).
+
+Buttons, all through the scenic route (**plan = dry-run preview → confirm →
+apply → undo**, purge only after you've reviewed the quarantine folder):
+
+| button | does |
+|---|---|
+| `scan + compare` | scan any detected drive, then compare it — no CLI needed |
+| `compare to …` | diff this run against a specific other scan / home / everything |
+| `import N new` | copy the run's new-to-you tracks into the target dir (structure preserved) |
+| `quarantine collection` | move a confirmed-redundant collection into reviewable quarantine |
+| `merge into …` | merge a twin into a primary — byte-identical files → quarantine, unique files → moved in, emptied dirs → removed; works **across drives** |
+| `plan dedupe` | within one run: keep the first copy of each byte-duplicate, quarantine the rest |
+| `open folder` | eyeball the collection (or the quarantine) in your file manager |
+| undo / purge | reverse an applied action — or, after review, permanently delete its quarantined files |
+
+Safety model: the server binds 127.0.0.1 on a random port behind a random
+URL token; mutations are POST-only and dry-run-planned first; nothing is
+ever deleted outside the quarantine tree; every step is journaled to
+`actions.log` with a JSON manifest per action. Drive-only rule: the scanned
+drive is only ever *read* — changes land in your import target or in
+brenda's quarantine.
 
 ## Privacy
 
