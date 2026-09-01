@@ -379,6 +379,21 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("serve: " + (fmt % args) + "\n")
 
     # -- plumbing ----------------------------------------------------------
+    def _host_ok(self):
+        """Defense in depth: only our own loopback Host header, and for
+        POSTs an Origin (browsers send it on cross-origin posts) matching
+        our own. A CSRFing web page cannot act without BOTH the token AND
+        the right origin — belt to the token's suspenders."""
+        host = (self.headers.get("Host") or "").split(":")[0].lower()
+        if host not in ("127.0.0.1", "localhost"):
+            return False
+        origin = self.headers.get("Origin")
+        if origin:
+            port = self.server.server_address[1]
+            if origin.rstrip("/") != f"http://127.0.0.1:{port}":
+                return False
+        return True
+
     def _route(self):
         path = urllib.parse.urlparse(self.path).path
         return path.split("/")
@@ -435,6 +450,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- GET ---------------------------------------------------------------
     def do_GET(self):
+        if not self._host_ok():
+            self._send(_page("brenda", "<h1>403</h1>"
+                             "<p class='sub'>wrong origin.</p>"), code=403)
+            return
         if not self._authed():
             self._send(_page("brenda", "<h1>404</h1><p class='sub'>nope.</p>"),
                        code=404)
@@ -490,6 +509,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST ---------------------------------------------------------------
     def do_POST(self):
+        if not self._host_ok():
+            self._send(_page("brenda", "<h1>403</h1>"
+                             "<p class='sub'>wrong origin.</p>"), code=403)
+            return
         if not self._authed():
             self._send(_page("brenda", "<h1>404</h1>"), code=404)
             return
@@ -739,6 +762,27 @@ def self_test():
         except urllib.error.HTTPError as e:
             gated = e.code in (401, 403, 404)
         check("wrong token rejected", gated)
+
+        # hardening: foreign Host header rejected; cross-origin POST Origin
+        # rejected; normal requests still pass
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/",
+                                     headers={"Host": "evil.com"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            h_ok = False
+        except urllib.error.HTTPError as e:
+            h_ok = e.code == 403
+        check("foreign Host header rejected", h_ok)
+        req = urllib.request.Request(base + "/", data=b"", method="POST",
+                                     headers={"Origin": "https://evil.com"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            o_ok = False
+        except urllib.error.HTTPError as e:
+            o_ok = e.code == 403
+        check("cross-origin POST rejected", o_ok)
+        code, _ = get("/")
+        check("normal requests still pass", code == 200)
     finally:
         if SERVER:
             SERVER.shutdown()
