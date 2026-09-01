@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""brenda — find redundant music, compare drives, dig playlists.
+
+One dispatcher, four jobs:
+  scan      find Music directories on a drive, dedup, song-match, report
+            (this is frm, byte-for-byte — also callable as `frm`)
+  compare   diff a scan run against your local music: exact / variant / new
+  dig       genre + BPM playlist builder (needs python3-aubio + python3-mutagen)
+  migrate-cache  convert the old path-keyed groovin BPM cache to md5-keyed
+
+Invoked as `frm` (argv[0]), this script behaves exactly like the original
+frm.py CLI — same flags, same behavior. That keeps `frm scan` / `frm drives`
+buttons in george (or anywhere else) working untouched.
+
+Data lives in ~/.local/share/brenda/ (or $BRENDA_DATA_HOME):
+  runs/<time>-<drive>/   report.{html,md,json} + hashes.tsv + file lists
+  latest -> newest run
+  index/local.json       local-music MD5 index (for compare)
+  playlists/             .m3u output of dig
+  bpm_cache.tsv          md5-keyed BPM cache (for dig)
+
+Read-only by design: scans and compares never modify anything on disk except
+their own output directory.
+"""
+
+import os
+import sys
+
+BRENDA_VERSION = "1.0.0"
+
+# make sibling imports work no matter how we were invoked (symlink included)
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+import frm  # noqa: E402
+
+USAGE = """\
+brenda %s — find redundant music, compare drives, dig playlists
+
+usage:
+  brenda scan [DRIVE] [frm options]   scan a drive for Music dirs (frm)
+  brenda drives                       list candidate drives
+  brenda compare [RUN] [--local DIR]  scan-run vs your local music
+  brenda dig [--genres ...] [--bpm-min N --bpm-max N]
+                                      playlist from the latest scan AND your
+                                      local music (local copies win dedup)
+  brenda migrate-cache                old groovin path-keyed bpm cache -> md5
+  brenda self-test                    run all built-in checks
+  brenda version                      version numbers
+
+run as `frm` (or `brenda scan`), the full frm CLI is available:
+  frm [DRIVE] --list-drives --no-dedup --no-songmatch --min-audio N
+      --outdir DIR --workers N --quiet --open --self-test --version
+
+data home: %s
+""" % (BRENDA_VERSION, frm.data_home())
+
+
+def cmd_drives(_argv):
+    drv = frm.list_drives()
+    if not drv:
+        print("No candidate drives found.")
+        return 0
+    for dev, mp, fs in drv:
+        print(f"{dev}\t{mp}\t{fs}")
+    return 0
+
+
+def cmd_compare(argv):
+    import compare
+    return compare.run_cli(argv)
+
+
+def cmd_dig(argv):
+    import grooves
+    return grooves.run_cli(argv)
+
+
+def cmd_migrate_cache(argv):
+    import argparse
+    import grooves
+    ap = argparse.ArgumentParser(
+        prog="brenda migrate-cache",
+        description="Convert the old path-keyed groovin bpm_cache.tsv to "
+                    "brenda's md5-keyed cache by joining it against the "
+                    "hashes.tsv of existing runs. Idempotent: entries already "
+                    "in the new cache are never overwritten.")
+    ap.add_argument("--old", default=os.path.expanduser("~/groovin/bpm_cache.tsv"),
+                    help="old path-keyed cache (default: %(default)s)")
+    ap.add_argument("--new", default=os.path.join(frm.data_home(), "bpm_cache.tsv"),
+                    help="new md5-keyed cache (default: data home)")
+    ap.add_argument("--run-dir", action="append", default=None, metavar="DIR",
+                    help="extra run dir(s) to harvest md5s from (repeatable)")
+    args = ap.parse_args(argv)
+
+    run_dirs = []
+    runs_root = os.path.join(frm.data_home(), "runs")
+    if os.path.isdir(runs_root):
+        run_dirs = [os.path.join(runs_root, d) for d in sorted(os.listdir(runs_root))
+                    if os.path.isdir(os.path.join(runs_root, d))]
+    legacy = os.path.expanduser("~/frm/runs")
+    if os.path.isdir(legacy):
+        run_dirs += [os.path.join(legacy, d) for d in sorted(os.listdir(legacy))
+                     if os.path.isdir(os.path.join(legacy, d))]
+    for d in (args.run_dir or []):
+        if os.path.isdir(d):
+            run_dirs.append(d)
+
+    if not os.path.isfile(args.old):
+        print(f"No old cache at {args.old} — nothing to migrate.")
+        return 0
+    print(f"migrating {args.old}", file=sys.stderr)
+    print(f"  from {len(run_dirs)} run dirs' hashes.tsv", file=sys.stderr)
+    m, du, df, col = grooves.migrate_path_cache(args.old, run_dirs, args.new)
+    print(f"  migrated: {m}  dropped (unknown path): {du}  "
+          f"dropped (recorded failure): {df}  already present: {col}",
+          file=sys.stderr)
+    print(f"  new cache: {args.new}", file=sys.stderr)
+    return 0
+
+
+def cmd_self_test(_argv):
+    import compare
+    import grooves
+    print(f"brenda {BRENDA_VERSION} self-test")
+    rc = 0
+    print()
+    rc |= frm.self_test()
+    print()
+    rc |= compare.self_test()
+    print()
+    rc |= grooves.self_test()
+    print()
+    print("brenda:", "ALL PASS" if rc == 0 else "FAILURES (see above)")
+    return rc
+
+
+def cmd_version(_argv):
+    print(f"brenda {BRENDA_VERSION} (frm {frm.VERSION})")
+    return 0
+
+
+def cmd_scan(argv):
+    # full frm CLI, announced as frm
+    sys.argv = [sys.argv[0]] + argv
+    sys.argv[0] = "frm"
+    return frm.main()
+
+
+COMMANDS = {
+    "scan": ("scan a drive for Music directories (the frm CLI)", cmd_scan),
+    "drives": ("list candidate drives", cmd_drives),
+    "compare": ("diff a scan run vs your local music", cmd_compare),
+    "dig": ("genre + BPM playlist from the latest scan", cmd_dig),
+    "migrate-cache": ("old groovin bpm cache -> md5-keyed", cmd_migrate_cache),
+    "self-test": ("run all built-in checks", cmd_self_test),
+    "version": ("print versions", cmd_version),
+}
+
+
+def main():
+    invoked_as = os.path.basename(sys.argv[0])
+    if invoked_as == "frm":                     # george / muscle-memory compat
+        return frm.main()
+
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0
+    cmd = argv[0]
+    if cmd in COMMANDS:
+        return COMMANDS[cmd][1](argv[1:])
+
+    print(f"brenda: unknown command '{cmd}'", file=sys.stderr)
+    if os.path.exists(cmd):
+        print(f"a path exists at '{cmd}' — did you mean: "
+              f"brenda scan '{cmd}' ?", file=sys.stderr)
+    print(f"try: brenda help", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
