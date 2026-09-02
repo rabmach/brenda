@@ -259,6 +259,8 @@ def dashboard(msg=""):
  <form method="post" action="target">
   <input type="text" name="target" value="{frm.esc(target)}" title="import target directory">
   <button type="submit">set import target</button></form>
+ <form method="post" action="stop" onsubmit="return confirm('Stop the brenda server? (the button starts it again)')">
+  <button class="warn" type="submit">stop server</button></form>
 </div>""")
 
     for r in runs:
@@ -348,12 +350,13 @@ def dashboard(msg=""):
 <p class="sub">plan → apply → undo (or purge after review). Every step journaled.</p>
 <table><tr><th>id</th><th>kind</th><th>status</th><th class="num">ops</th><th></th></tr>
 {rows}</table>""")
-        parts.append("""
+
+    dedupe_opts = _opts([(r["id"], os.path.basename(r["root"]) + " — " + r["id"])
+                         for r in runs])
+    parts.append(f"""
 <div class="bar"><form method="post" action="plan/dedupe">
-<select name="run">""" + _opts([(r["id"], os.path.basename(r["root"]) + " — " + r["id"]) for r in runs]) + """
-</select><button class="warn" type="submit"
- onsubmit2="x" onclick="return confirm('Plan dedupe of this run? (later byte-identical copies quarantined)')">plan dedupe</button></form>
-<form method="post" action="stop"><button class="warn" type="submit">stop server</button></form>
+<select name="run">{dedupe_opts}</select>
+<button class="warn" type="submit" onclick="return confirm('Plan dedupe of this run? (later byte-identical copies quarantined)')">plan dedupe</button></form>
 </div>""")
 
     return _page("brenda dashboard", "\n".join(parts), refresh=5)
@@ -749,6 +752,7 @@ def self_test():
         check("dashboard lists the collection", "backups: Music" in html
               or "backups" in html)
         check("dashboard has import button", "import" in html)
+        check("stop button present with zero actions", "stop server" in html)
 
         code, html = get(f"/report/testdrive")
         check("wrapped report 200", code == 200
