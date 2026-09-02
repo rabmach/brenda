@@ -43,24 +43,40 @@ import frm
 class State:
     def __init__(self):
         self.token = secrets.token_hex(16)
+        self.url = None
         self.busy = threading.Lock()
         self.target = os.path.expanduser(
             f"~/Music/imported-{datetime.date.today():%Y%m%d}")
         state_file = os.path.join(frm.data_home(), "serve.state.json")
+        self._state_file = state_file
         try:
             with open(state_file) as f:
-                self.target = json.load(f).get("target", self.target)
+                d = json.load(f)
+            self.target = d.get("target", self.target)
         except (OSError, json.JSONDecodeError):
             pass
-        self._state_file = state_file
+
+    def save(self):
+        """Persist target + live URL (chmod 600 — the URL carries the token)."""
+        try:
+            with open(self._state_file, "w") as f:
+                json.dump({"target": self.target, "url": self.url}, f)
+            os.chmod(self._state_file, 0o600)
+        except OSError:
+            pass
 
     def set_target(self, t):
         self.target = t
-        try:
-            with open(self._state_file, "w") as f:
-                json.dump({"target": t}, f)
-        except OSError:
-            pass
+        self.save()
+
+
+def _saved_url():
+    """URL of a running server, if one was persisted."""
+    try:
+        with open(os.path.join(frm.data_home(), "serve.state.json")) as f:
+            return json.load(f).get("url")
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 STATE = None      # set in serve()
@@ -620,6 +636,15 @@ def serve(port=None, no_open=False):
         try:
             pid = int(open(pidfile).read().strip())
             os.kill(pid, 0)
+            # already running: open the live dashboard instead of failing
+            url = _saved_url()
+            if url:
+                subprocess.Popen(["xdg-open", url],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                print(f"brenda serve already running (pid {pid}) — "
+                      f"opened {url}", file=sys.stderr)
+                return 0
             raise SystemExit(f"brenda serve already running (pid {pid}) — "
                              f"stop it first (dashboard has a stop button, "
                              f"or kill {pid})")
@@ -634,6 +659,8 @@ def serve(port=None, no_open=False):
     with open(pidfile, "w") as f:
         f.write(str(os.getpid()))
     url = f"http://127.0.0.1:{port}/{STATE.token}/"
+    STATE.url = url
+    STATE.save()
     print(f"brenda serve: {url}", file=sys.stderr)
     print("(localhost only; token-gated; ctrl+c stops)", file=sys.stderr)
     if not no_open:

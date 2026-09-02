@@ -27,7 +27,7 @@ their own output directory.
 import os
 import sys
 
-BRENDA_VERSION = "1.1.0"
+BRENDA_VERSION = "1.1.1"
 
 # make sibling imports work no matter how we were invoked (symlink included)
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
