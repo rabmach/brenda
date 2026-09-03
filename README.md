@@ -5,11 +5,6 @@ the boxes where music actually lives.
 
 If you are like me you keep piling backup upon backup to an external drive and you end up with a bunch of redundancy. After restoring my system (see DORiS) I wanted my music back and there was quite a mess on my dump drive. brenda came out of that: find all that music (and it only looks in music directories) and do something with it.
 
-> this is a wicked tool for that lazy-dumper, like me, that dumps a bunch of
-> redundant stuff onto a drive over time and then forgets which is the right
-> one, or, what to restore from.
->
-> — machiner
 
 brenda is three tools in one keyboard-friendly command:
 
