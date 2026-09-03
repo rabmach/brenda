@@ -1,5 +1,7 @@
 # brenda
 
+*Built in the open: human-directed, AI-assisted ([opencode](https://github.com/anomalyco/opencode)), human-verified.*
+
 **Find redundant music, compare drives, dig playlists.** Read-only triage for
 the boxes where music actually lives.
 
