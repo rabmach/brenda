@@ -75,10 +75,15 @@ def _live_files(root):
     return out
 
 
-def _collision_free(dst, tag="merged"):
+def _collision_free(dst, tag="merged", planned=None):
+    """First dst name that is free. planned = dst paths already assigned by
+    OTHER OPS IN THE SAME PLAN (the drive does not know about them yet —
+    without this, two same-named sources both get ' (merged 1)')."""
+    def taken(p):
+        return os.path.exists(p) or (planned is not None and p in planned)
     base, ext = os.path.splitext(dst)
     i = 1
-    while os.path.exists(dst):
+    while taken(dst):
         dst = f"{base} ({tag} {i}){ext}"
         i += 1
     return dst
@@ -248,6 +253,7 @@ def plan_import(run_dir, collection_path, target, move=False):
     n_tracks = n_dirs = 0
     handled = set()                    # audio files covered by whole-dir ops
     moved_roots = []                   # dirs gone wholesale
+    planned = set()                    # dsts assigned by THIS plan
 
     artists = sorted(d for d in os.listdir(collection_path)
                      if os.path.isdir(os.path.join(collection_path, d)))
@@ -255,11 +261,12 @@ def plan_import(run_dir, collection_path, target, move=False):
         adir = os.path.join(collection_path, a)
         audio_a, all_new = _subtree_all_audio_new(adir, new, live_audio)
         junk_a = _subtree_junk(adir, live)
+        dst_a = os.path.join(target, a)
         if all_new and not junk_a \
-                and not os.path.exists(os.path.join(target, a)):
-            ops.append({"op": dir_kind, "src": adir,
-                        "dst": os.path.join(target, a),
+                and not os.path.exists(dst_a) and dst_a not in planned:
+            ops.append({"op": dir_kind, "src": adir, "dst": dst_a,
                         "why": "whole artist dir is new to you"})
+            planned.add(dst_a)
             handled.update(audio_a)
             n_tracks += len(audio_a)
             n_dirs += 1
@@ -270,11 +277,12 @@ def plan_import(run_dir, collection_path, target, move=False):
             aldir = os.path.join(adir, alb)
             audio_al, all_new = _subtree_all_audio_new(aldir, new, live_audio)
             junk_al = _subtree_junk(aldir, live)
+            dst_al = os.path.join(target, a, alb)
             if all_new and not junk_al \
-                    and not os.path.exists(os.path.join(target, a, alb)):
-                ops.append({"op": dir_kind, "src": aldir,
-                            "dst": os.path.join(target, a, alb),
+                    and not os.path.exists(dst_al) and dst_al not in planned:
+                ops.append({"op": dir_kind, "src": aldir, "dst": dst_al,
                             "why": "whole album dir is new to you"})
+                planned.add(dst_al)
                 handled.update(audio_al)
                 n_tracks += len(audio_al)
                 n_dirs += 1
@@ -291,15 +299,18 @@ def plan_import(run_dir, collection_path, target, move=False):
                 continue
             rel = os.path.relpath(f, collection_path)
             dst = os.path.join(target, rel)
-            if os.path.exists(dst):
+            if os.path.exists(dst) or dst in planned:
                 continue                 # art/playlist already at target
             ops.append({"op": op_kind, "src": f, "dst": dst,
                         "why": "cover art / playlist goes along"})
+            planned.add(dst)
     for f in leftovers:
         rel = os.path.relpath(f, collection_path)
-        dst = _collision_free(os.path.join(target, rel), "imported")
+        dst = _collision_free(os.path.join(target, rel), "imported",
+                              planned=planned)
         ops.append({"op": op_kind, "src": f, "dst": dst,
                     "why": "new to you"})
+        planned.add(dst)
         n_tracks += 1
 
     junk_n = len([f for f in live if not _is_audio(f) and not _rides(f)])
@@ -521,6 +532,8 @@ def plan_merge(run_dir, primary_path, copy_path):
     ops = []
     n_q = n_m = n_dirs = 0
     moved_roots = []                   # artist/album dirs gone wholesale
+    planned = set()                    # dsts assigned by THIS plan — other
+                                       # ops must not collide with them
 
     def in_moved(f):
         return any(f == r or f.startswith(r + os.sep) for r in moved_roots)
@@ -535,10 +548,12 @@ def plan_merge(run_dir, primary_path, copy_path):
         audio_a = [f for f in live_audio if f.startswith(adir + os.sep)]
         junk_a = _subtree_junk(adir, live)
         if audio_a and not any(f in twins for f in audio_a) and not junk_a \
-                and not os.path.exists(os.path.join(primary_path, a)):
+                and not os.path.exists(os.path.join(primary_path, a)) \
+                and os.path.join(primary_path, a) not in planned:
             ops.append({"op": "move_dir", "src": adir,
                         "dst": os.path.join(primary_path, a),
                         "why": "whole artist dir is unique to this collection"})
+            planned.add(ops[-1]["dst"])
             moved_roots.append(adir)
             n_m += len(audio_a)
             n_dirs += 1
@@ -549,10 +564,12 @@ def plan_merge(run_dir, primary_path, copy_path):
             audio_al = [f for f in live_audio if f.startswith(aldir + os.sep)]
             junk_al = _subtree_junk(aldir, live)
             if audio_al and not any(f in twins for f in audio_al) and not junk_al \
-                    and not os.path.exists(os.path.join(primary_path, a, alb)):
+                    and not os.path.exists(os.path.join(primary_path, a, alb)) \
+                    and os.path.join(primary_path, a, alb) not in planned:
                 ops.append({"op": "move_dir", "src": aldir,
                             "dst": os.path.join(primary_path, a, alb),
                             "why": "whole album dir is unique to this collection"})
+                planned.add(ops[-1]["dst"])
                 moved_roots.append(aldir)
                 n_m += len(audio_al)
                 n_dirs += 1
@@ -564,16 +581,17 @@ def plan_merge(run_dir, primary_path, copy_path):
         h = hashes.get(src)
         rel = os.path.relpath(src, copy_path)
         if h and h in primary_md5:
-            ops.append({"op": "move", "src": src,
-                        "dst": os.path.join(q_root, rel),
+            dst = os.path.join(q_root, rel)
+            ops.append({"op": "move", "src": src, "dst": dst,
                         "why": "byte-identical copy exists in primary"})
+            planned.add(dst)
             n_q += 1
         else:
-            dst = os.path.join(primary_path, rel)
-            if os.path.exists(dst):
-                dst = _collision_free(dst)
+            dst = _collision_free(os.path.join(primary_path, rel),
+                                  planned=planned)
             ops.append({"op": "move", "src": src, "dst": dst,
                         "why": "unique to this collection"})
+            planned.add(dst)
             n_m += 1
 
     # cover art + playlists go along (junk never does)
@@ -582,17 +600,19 @@ def plan_merge(run_dir, primary_path, copy_path):
             continue
         rel = os.path.relpath(src, copy_path)
         dst = os.path.join(primary_path, rel)
-        if os.path.exists(dst):
+        if os.path.exists(dst) or dst in planned:
             h_src, h_dst = _md5_file(src), _md5_file(dst)
             if h_src and h_dst and h_src == h_dst:
-                ops.append({"op": "move", "src": src,
-                            "dst": os.path.join(q_root, rel),
+                dst = os.path.join(q_root, rel)
+                ops.append({"op": "move", "src": src, "dst": dst,
                             "why": "byte-identical art/playlist in primary"})
+                planned.add(dst)
                 n_q += 1
                 continue
-            dst = _collision_free(dst)
+            dst = _collision_free(dst, planned=planned)
         ops.append({"op": "move", "src": src, "dst": dst,
                     "why": "cover art / playlist goes along"})
+        planned.add(dst)
         n_m += 1
 
     # emptied dirs get removed deepest-first — but only dirs that will
@@ -710,6 +730,7 @@ def apply_plan(plan):
         _delete_guard(plan, hashes)      # raises before anything is touched
     done = skipped = 0
     errors = []
+    renamed = 0
     for op in plan["ops"]:
         kind = op["op"]
         src = op.get("src")
@@ -729,7 +750,12 @@ def apply_plan(plan):
                     continue
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 if os.path.exists(dst):
-                    raise FileExistsError(f"destination exists: {dst}")
+                    # safety net: the drive changed since the plan (another
+                    # op, another session). Rename instead of losing the op —
+                    # the manifest's dst is updated so undo follows it.
+                    dst = _collision_free(dst)
+                    op["dst"] = dst
+                    renamed += 1
                 shutil.move(src, dst)
             elif kind == "copy_dir":
                 if not os.path.isdir(src):
@@ -744,7 +770,9 @@ def apply_plan(plan):
                     continue
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 if os.path.exists(dst):
-                    raise FileExistsError(f"destination exists: {dst}")
+                    dst = _collision_free(dst)
+                    op["dst"] = dst
+                    renamed += 1
                 shutil.move(src, dst)
             elif kind == "delete_dir":
                 if not os.path.isdir(src):
@@ -767,6 +795,9 @@ def apply_plan(plan):
     plan["status"] = "applied"
     plan["applied"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     plan["result"] = {"done": done, "skipped": skipped, "errors": errors[:50]}
+    if renamed:
+        plan["notes"].append(f"{renamed} destination(s) renamed on collision "
+                             "at apply time — manifest updated, undo follows")
     if skipped:
         plan["notes"].append(f"{skipped} op(s) skipped — source missing")
     if errors:
@@ -1263,6 +1294,55 @@ def self_test():
         except ValueError:
             refused = True
         check("delete has no undo", refused)
+
+        # --- collision within ONE plan: the real-world shape ---------------
+        # primary has Song.mp3; the source has Song.mp3 AND a pre-existing
+        # 'Song (merged 1).mp3' (leftover from an earlier merge history).
+        # Op1 claims the free (merged 1) slot; op2's rename must skip it.
+        c5 = os.path.join(drive, "twofive", "Music")
+        os.makedirs(os.path.join(c5, "Unknown"))
+        os.makedirs(os.path.join(a, "Unknown"))
+        open(os.path.join(c5, "Unknown", "Song.mp3"), "wb").write(b"V1")
+        open(os.path.join(c5, "Unknown", "Song (merged 1).mp3"),
+             "wb").write(b"V1-OLD-MERGED")
+        open(os.path.join(c5, "Unknown", "Third.mp3"), "wb").write(b"T3")
+        open(os.path.join(a, "Unknown", "Song.mp3"), "wb").write(b"PRI")
+        data = frm.analyze(drive, cfg)
+        rundir5 = os.path.join(tmp, "run5")
+        os.makedirs(rundir5)
+        frm.export_run(data, drive, rundir5)
+        plan8 = plan_merge(rundir5, a, c5)
+        dsts = sorted(o["dst"] for o in plan8["ops"]
+                      if o["op"] == "move"
+                      and "Song" in os.path.basename(o["dst"]))
+        check("same-name sources get DISTINCT planned destinations",
+              len(dsts) == 2 and len(set(dsts)) == 2)
+        apply_plan(plan8)
+        landed = set(os.listdir(os.path.join(a, "Unknown")))
+        check("all three variants landed, none lost",
+              landed == {"Song.mp3", "Song (merged 1).mp3",
+                         "Song (merged 2).mp3", "Third.mp3"})
+        undo(plan8["id"])
+        check("undo follows the renamed destinations",
+              os.path.isfile(os.path.join(c5, "Unknown", "Song.mp3"))
+              and os.path.isfile(os.path.join(c5, "Unknown",
+                                              "Song (merged 1).mp3"))
+              and os.path.isfile(os.path.join(a, "Unknown", "Song.mp3")))
+
+        # --- apply-time collision: drive changed between plan and apply -----
+        plan9 = plan_merge(rundir5, a, c5)
+        # sneak a file into the planned destination after planning
+        open(os.path.join(a, "Unknown", "Song (merged 1).mp3"), "wb").write(
+            b"SNEAK")
+        apply_plan(plan9)
+        check("apply-time collisions renamed instead of erroring",
+              plan9["result"]["errors"] == []
+              and any("renamed on collision" in n for n in plan9["notes"]))
+        undo(plan9["id"])
+        sneak_path = os.path.join(a, "Unknown", "Song (merged 1).mp3")
+        sneak_ok = os.path.isfile(sneak_path) \
+            and open(sneak_path, "rb").read() == b"SNEAK"
+        check("undo does not touch the pre-existing sneaky file", sneak_ok)
 
         check("actions.log exists and has entries",
               os.path.isfile(log_path())

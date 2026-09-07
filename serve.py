@@ -587,7 +587,13 @@ def _actions_section():
         res = a.get("result", {})
         note = ""
         if res.get("errors"):
-            note = f"<br><small class='warn'>{len(res['errors'])} op(s) FAILED — see result.errors</small>"
+            lis = "".join(f"<li>{frm.esc(e)}</li>" for e in res["errors"][:3])
+            more = (f"<li class='dim'>… {len(res['errors']) - 3} more</li>"
+                    if len(res["errors"]) > 3 else "")
+            note = (f"<br><small class='warn'>{len(res['errors'])} op(s) "
+                    f"FAILED — detail below and in <code>~/.local/share/"
+                    f"brenda/actions/{frm.esc(a['id'])}.json</code>"
+                    f"<ul style='padding-left:18px'>{lis}{more}</ul></small>")
         if st == "planned":
             badge = '<span class="mnt badge-off">waiting for you</span>'
             btns = (f"<form method='post' action='apply'>"
@@ -1000,7 +1006,17 @@ class Handler(BaseHTTPRequestHandler):
                 extra = ""
                 extra_plain = ""
                 if plan["result"]["errors"]:
-                    extra = extra_plain = " — SOME OPS FAILED, see the notes"
+                    first = plan["result"]["errors"][0]
+                    n_more = len(plan["result"]["errors"]) - 1
+                    extra = (f" — <b>{len(plan['result']['errors'])} op(s) "
+                             f"FAILED</b>: {frm.esc(first[:180])}"
+                             + (f" (+{n_more} more)" if n_more else "")
+                             + f" — full detail: <code>~/.local/share/"
+                               f"brenda/actions/{frm.esc(plan['id'])}.json</code>")
+                    extra_plain = (f" — {len(plan['result']['errors'])} "
+                                   f"op(s) FAILED: {first[:200]} (full "
+                                   f"detail: ~/.local/share/brenda/actions/"
+                                   f"{plan['id']}.json)")
                 elif plan["kind"] in ("merge", "quarantine", "dedupe",
                                       "delete"):
                     extra = extra_plain = (" — re-scan the drive and its "
