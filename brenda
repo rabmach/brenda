@@ -17,6 +17,7 @@ Data lives in ~/.local/share/brenda/ (or $BRENDA_DATA_HOME):
   runs/<time>-<drive>/   report.{html,md,json} + hashes.tsv + file lists
   latest -> newest run
   index/local.json       local-music MD5 index (for compare)
+  hashcache.tsv          drive-file MD5 cache — re-scans hash only changes
   playlists/             .m3u output of dig
   bpm_cache.tsv          md5-keyed BPM cache (for dig)
 
@@ -27,7 +28,7 @@ their own output directory.
 import os
 import sys
 
-BRENDA_VERSION = "1.1.2"
+BRENDA_VERSION = "2.0.0-dev"
 
 # make sibling imports work no matter how we were invoked (symlink included)
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))

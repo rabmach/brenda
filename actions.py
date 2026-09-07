@@ -28,6 +28,7 @@ Requirements: Python 3.8+, standard library only.
 """
 
 import datetime
+import hashlib
 import json
 import os
 import secrets
@@ -36,7 +37,63 @@ import sys
 
 import frm
 
-VALID_KINDS = ("import", "quarantine", "merge", "dedupe")
+VALID_KINDS = ("import", "quarantine", "merge", "dedupe", "delete")
+
+# cover art + playlists complete an artist/album dir and go along for the
+# ride when its music is merged/moved/imported. Everything else (zips, logs,
+# executables, …) is JUNK: brenda never moves it and never deletes it — the
+# containing dir simply survives until you deal with it yourself.
+IMG_EXT = {"jpg", "jpeg", "png", "gif", "bmp", "webp"}
+
+
+def _rides(path):
+    e = os.path.splitext(path)[1][1:].lower()
+    return e in IMG_EXT or e in frm.PLAYLIST_EXT
+
+
+def _is_audio(path):
+    return os.path.splitext(path)[1][1:].lower() in frm.AUDIO_EXT
+
+
+def _md5_file(path):
+    """md5 of a small-ish file (images, playlists). None on error."""
+    try:
+        h = hashlib.md5()
+        with open(path, "rb") as f:
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _live_files(root):
+    out = []
+    for base, _ds, fs in os.walk(root, followlinks=False):
+        for f in fs:
+            out.append(os.path.join(base, f))
+    return out
+
+
+def _collision_free(dst, tag="merged"):
+    base, ext = os.path.splitext(dst)
+    i = 1
+    while os.path.exists(dst):
+        dst = f"{base} ({tag} {i}){ext}"
+        i += 1
+    return dst
+
+
+def _subtree_all_audio_new(base, new, live_audio):
+    audio = [f for f in live_audio if f.startswith(base + os.sep)]
+    return audio, bool(audio) and all(f in new for f in audio)
+
+
+def _subtree_junk(base, live):
+    """Files brenda will not move: neither audio, nor art/playlists."""
+    return [f for f in live
+            if f.startswith(base + os.sep)
+            and not _is_audio(f) and not _rides(f)]
 
 
 # --------------------------------------------------------------------------
@@ -155,32 +212,109 @@ def _file_list(rundir, collection_path, root):
 # plan builders (all dry runs — they only compute, never touch)
 # --------------------------------------------------------------------------
 
-def plan_import(run_dir, collection_path, target):
-    """Copy the run's 'new to you' files of one collection into target,
-    preserving the structure under the collection."""
+def plan_import(run_dir, collection_path, target, move=False):
+    """Bring the run's 'new to you' files of one collection into the target
+    dir, preserving the structure under the collection. Copy by default;
+    move=True relocates instead (undo puts it back).
+
+    Granularity is directory-first: an artist dir that is entirely new to
+    you and free of junk goes over WHOLE (music, cover art, playlists) —
+    else an album dir that is entirely new and junk-free — else file-level:
+    the new tracks plus the cover art and playlists of the dirs involved.
+    Art/playlists already at the target are skipped. Junk (zips etc.) is
+    never copied or moved."""
     report, _ = _load_run(run_dir)
     coll = _assert_collection(report, collection_path)
     root = report["meta"]["root"]
-    new = _new_files_from_compare(run_dir, collection_path)
+    new = set(_new_files_from_compare(run_dir, collection_path))
     if not new:
         raise ValueError("no 'new to you' files recorded for this collection "
                          "(run brenda compare first, and make sure this "
                          "collection still has new files)")
     target = os.path.abspath(os.path.expanduser(target))
+    if not os.path.isdir(collection_path):
+        raise ValueError(f"collection directory not found (drive mounted?): "
+                         f"{collection_path}")
+    op_kind = "move" if move else "copy"
+    dir_kind = "move_dir" if move else "copy_dir"
+
+    audio_all = [f for f in _file_list(run_dir, collection_path, root)
+                 if os.path.isfile(f)]
+    live = _live_files(collection_path)
+    live_audio = {f for f in live if _is_audio(f)}
+    audio_all = sorted(live_audio | {f for f in audio_all if os.path.isfile(f)})
+
     ops = []
-    for src in new:
-        rel = os.path.relpath(src, collection_path)
-        ops.append({"op": "copy", "src": src,
-                    "dst": os.path.join(target, rel),
+    n_tracks = n_dirs = 0
+    handled = set()                    # audio files covered by whole-dir ops
+    moved_roots = []                   # dirs gone wholesale
+
+    artists = sorted(d for d in os.listdir(collection_path)
+                     if os.path.isdir(os.path.join(collection_path, d)))
+    for a in artists:
+        adir = os.path.join(collection_path, a)
+        audio_a, all_new = _subtree_all_audio_new(adir, new, live_audio)
+        junk_a = _subtree_junk(adir, live)
+        if all_new and not junk_a \
+                and not os.path.exists(os.path.join(target, a)):
+            ops.append({"op": dir_kind, "src": adir,
+                        "dst": os.path.join(target, a),
+                        "why": "whole artist dir is new to you"})
+            handled.update(audio_a)
+            n_tracks += len(audio_a)
+            n_dirs += 1
+            moved_roots.append(adir)
+            continue
+        for alb in sorted(d for d in os.listdir(adir)
+                          if os.path.isdir(os.path.join(adir, d))):
+            aldir = os.path.join(adir, alb)
+            audio_al, all_new = _subtree_all_audio_new(aldir, new, live_audio)
+            junk_al = _subtree_junk(aldir, live)
+            if all_new and not junk_al \
+                    and not os.path.exists(os.path.join(target, a, alb)):
+                ops.append({"op": dir_kind, "src": aldir,
+                            "dst": os.path.join(target, a, alb),
+                            "why": "whole album dir is new to you"})
+                handled.update(audio_al)
+                n_tracks += len(audio_al)
+                n_dirs += 1
+                moved_roots.append(aldir)
+
+    def in_moved(f):
+        return any(f.startswith(r + os.sep) for r in moved_roots)
+
+    leftovers = sorted(f for f in audio_all if f in new and f not in handled)
+    ride_dirs = sorted({os.path.dirname(f) for f in leftovers})
+    for d in ride_dirs:
+        for f in _live_files(d):
+            if not _rides(f) or in_moved(f):
+                continue
+            rel = os.path.relpath(f, collection_path)
+            dst = os.path.join(target, rel)
+            if os.path.exists(dst):
+                continue                 # art/playlist already at target
+            ops.append({"op": op_kind, "src": f, "dst": dst,
+                        "why": "cover art / playlist goes along"})
+    for f in leftovers:
+        rel = os.path.relpath(f, collection_path)
+        dst = _collision_free(os.path.join(target, rel), "imported")
+        ops.append({"op": op_kind, "src": f, "dst": dst,
                     "why": "new to you"})
+        n_tracks += 1
+
+    junk_n = len([f for f in live if not _is_audio(f) and not _rides(f)])
     plan = {"id": _new_id(), "kind": "import", "run": run_dir,
             "collection": collection_path, "target": target,
-            "root": root, "ops": ops,
-            "counts": {"copy": len(ops)},
+            "mode": "move" if move else "copy", "root": root, "ops": ops,
+            "counts": {"tracks": n_tracks, "whole_dirs": n_dirs},
             "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "status": "planned", "notes": []}
     if not os.path.isdir(target):
         plan["notes"].append(f"target will be created: {target}")
+    if junk_n:
+        plan["notes"].append(f"{junk_n} junk file(s) (zips etc.) in this "
+                             "collection are NOT included — brenda never "
+                             "moves or deletes those")
     _check_sources_exist(plan)
     _journal("planned", plan)
     _save(plan)
@@ -224,6 +358,101 @@ def plan_quarantine(run_dir, collection_path):
     return plan
 
 
+def plan_delete(run_dir, collection_path):
+    """Delete a whole collection directory from the drive — the explicit,
+    instant end for a verified-redundant dump (a normal filesystem delete,
+    not a slow secure-erase). Guard: EVERY music file in the collection must
+    still have a byte-identical copy somewhere outside it (checked against
+    every run's hashes.tsv and the local index, live existence) — otherwise
+    the plan is refused and nothing is touched. Non-music files (cover art,
+    playlists, zips) go too — that is the point of an explicit delete — and
+    the confirm page names the counts. Permanent: no undo, journaled."""
+    report, hashes = _load_run(run_dir)
+    coll = _assert_collection(report, collection_path)
+    root = report["meta"]["root"]
+    if not os.path.isdir(collection_path):
+        raise ValueError(f"collection directory not found (drive mounted?): "
+                         f"{collection_path}")
+    live = _live_files(collection_path)
+    audio = [f for f in live if _is_audio(f)]
+    non_music = len(live) - len(audio)
+    md5s = _indexed_md5_map(exclude=collection_path)
+    # this run's own hashes are the authority on what was here — merge them
+    # in (the collection's own paths excluded: it cannot vouch for itself)
+    excl_real = os.path.realpath(collection_path)
+    for p, h in hashes.items():
+        real = os.path.realpath(p)
+        if _within(real, excl_real) or _within(real, quarantine_root()):
+            continue
+        md5s.setdefault(h, set()).add(real)
+    guards = []
+    problems = []
+    for f in audio:
+        h = hashes.get(f) or _md5_file(f)
+        if not h:
+            problems.append(f"{f}: unreadable, md5 unknown")
+            continue
+        guards.append({"path": f, "md5": h})
+        if not any(os.path.isfile(p) for p in md5s.get(h, ())):
+            problems.append(f"{f} ({h[:8]}…): no surviving byte-identical "
+                            "copy outside this collection")
+    if problems:
+        raise ValueError(
+            f"delete refused — {len(problems)} music file(s) in this "
+            f"collection have no surviving copy elsewhere (first: "
+            f"{problems[0]}). This directory is NOT safely deletable. "
+            "Nothing was touched.")
+    total = 0
+    for f in live:
+        try:
+            total += os.lstat(f).st_size
+        except OSError:
+            pass
+    plan = {"id": _new_id(), "kind": "delete", "run": run_dir,
+            "collection": collection_path, "root": root,
+            "ops": [{"op": "delete_dir", "src": collection_path,
+                     "why": "verified redundant — every music file exists "
+                            "elsewhere"}],
+            "guards": guards,
+            "counts": {"audio_files": len(audio), "non_music": non_music,
+                       "bytes": total},
+            "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "planned",
+            "notes": [f"permanent: {len(audio)} music + {non_music} "
+                      "non-music file(s) (art/playlists/zips) will be gone "
+                      "— there is no undo"]}
+    _journal("planned", plan)
+    _save(plan)
+    return plan
+
+
+def _delete_guard(plan, hashes):
+    """Re-verify at apply time: every music file the plan promises is
+    redundant must still have a surviving copy. Raises before ANY deletion."""
+    src = plan["ops"][0]["src"]
+    if not os.path.isdir(src):
+        raise ValueError("collection directory is already gone — nothing "
+                         "to delete")
+    md5s = _indexed_md5_map(exclude=src)
+    excl_real = os.path.realpath(src)
+    for p, h in hashes.items():
+        real = os.path.realpath(p)
+        if _within(real, excl_real) or _within(real, quarantine_root()):
+            continue
+        md5s.setdefault(h, set()).add(real)
+    problems = []
+    for g in plan.get("guards", []):
+        if not os.path.isfile(g["path"]):
+            continue                        # vanished already — fine
+        if not any(os.path.isfile(p) for p in md5s.get(g["md5"], ())):
+            problems.append(g["path"])
+    if problems:
+        raise ValueError(
+            f"delete aborted at apply time — {len(problems)} music file(s) "
+            f"lost their surviving copy since the plan was made (first: "
+            f"{problems[0]}). Nothing was deleted.")
+
+
 def _find_run_of(collection_path):
     """Find the run dir (data home) whose report lists this collection."""
     runs_root = os.path.join(data_home(), "runs")
@@ -262,6 +491,7 @@ def plan_merge(run_dir, primary_path, copy_path):
     primary_files = None
     primary_md5 = None
     pr_run_dir = run_dir
+    pr_root = root
     if any(d["path"] == primary_path for d in report["dirs"]):
         primary_files = _file_list(run_dir, primary_path, root)
         primary_md5 = {hashes[f] for f in primary_files if f in hashes}
@@ -281,9 +511,56 @@ def plan_merge(run_dir, primary_path, copy_path):
 
     copy_files = _file_list(run_dir, copy_path, root)
     q_root = os.path.join(quarantine_root(), "merges", _new_id() + os.sep)
+    live = _live_files(copy_path)
+    live_audio = {f for f in live if _is_audio(f)}
+    twins = {f for f in copy_files if hashes.get(f) and hashes[f] in primary_md5}
+    extra_audio = sorted(f for f in live_audio if f not in set(copy_files))
+    ride = [f for f in live if _rides(f)]
+    junk = [f for f in live if not _is_audio(f) and not _rides(f)]
+
     ops = []
-    n_q = n_m = 0
-    for src in copy_files:
+    n_q = n_m = n_dirs = 0
+    moved_roots = []                   # artist/album dirs gone wholesale
+
+    def in_moved(f):
+        return any(f == r or f.startswith(r + os.sep) for r in moved_roots)
+
+    # whole-dir merges first: an artist (or album) dir that is entirely
+    # unique to this collection and junk-free moves into the primary in
+    # one piece — cover art and playlists ride along.
+    artists = sorted(d for d in os.listdir(copy_path)
+                     if os.path.isdir(os.path.join(copy_path, d)))
+    for a in artists:
+        adir = os.path.join(copy_path, a)
+        audio_a = [f for f in live_audio if f.startswith(adir + os.sep)]
+        junk_a = _subtree_junk(adir, live)
+        if audio_a and not any(f in twins for f in audio_a) and not junk_a \
+                and not os.path.exists(os.path.join(primary_path, a)):
+            ops.append({"op": "move_dir", "src": adir,
+                        "dst": os.path.join(primary_path, a),
+                        "why": "whole artist dir is unique to this collection"})
+            moved_roots.append(adir)
+            n_m += len(audio_a)
+            n_dirs += 1
+            continue
+        for alb in sorted(d for d in os.listdir(adir)
+                          if os.path.isdir(os.path.join(adir, d))):
+            aldir = os.path.join(adir, alb)
+            audio_al = [f for f in live_audio if f.startswith(aldir + os.sep)]
+            junk_al = _subtree_junk(aldir, live)
+            if audio_al and not any(f in twins for f in audio_al) and not junk_al \
+                    and not os.path.exists(os.path.join(primary_path, a, alb)):
+                ops.append({"op": "move_dir", "src": aldir,
+                            "dst": os.path.join(primary_path, a, alb),
+                            "why": "whole album dir is unique to this collection"})
+                moved_roots.append(aldir)
+                n_m += len(audio_al)
+                n_dirs += 1
+
+    # file-level: audio left over (twins quarantined, uniques merged in)
+    for src in copy_files + extra_audio:
+        if in_moved(src):
+            continue
         h = hashes.get(src)
         rel = os.path.relpath(src, copy_path)
         if h and h in primary_md5:
@@ -293,29 +570,67 @@ def plan_merge(run_dir, primary_path, copy_path):
             n_q += 1
         else:
             dst = os.path.join(primary_path, rel)
-            if os.path.exists(dst):          # same name, different bytes
-                base, ext = os.path.splitext(dst)
-                i = 1
-                while os.path.exists(dst):
-                    dst = f"{base} (merged {i}){ext}"
-                    i += 1
+            if os.path.exists(dst):
+                dst = _collision_free(dst)
             ops.append({"op": "move", "src": src, "dst": dst,
                         "why": "unique to this collection"})
             n_m += 1
-    # emptied dirs get removed deepest-first (undo recreates them)
-    dirs = []
+
+    # cover art + playlists go along (junk never does)
+    for src in ride:
+        if in_moved(src):
+            continue
+        rel = os.path.relpath(src, copy_path)
+        dst = os.path.join(primary_path, rel)
+        if os.path.exists(dst):
+            h_src, h_dst = _md5_file(src), _md5_file(dst)
+            if h_src and h_dst and h_src == h_dst:
+                ops.append({"op": "move", "src": src,
+                            "dst": os.path.join(q_root, rel),
+                            "why": "byte-identical art/playlist in primary"})
+                n_q += 1
+                continue
+            dst = _collision_free(dst)
+        ops.append({"op": "move", "src": src, "dst": dst,
+                    "why": "cover art / playlist goes along"})
+        n_m += 1
+
+    # emptied dirs get removed deepest-first — but only dirs that will
+    # actually empty (junk keeps its dir alive; undo recreates removed ones)
+    junk_set = set(junk)
+    all_dirs = []
     for base, ds, _fs in os.walk(copy_path, topdown=False, followlinks=False):
         if base != copy_path:
-            dirs.append(base)
-    for d in dirs:
+            all_dirs.append(base)
+    alive = {d for d in all_dirs
+             if any(os.path.join(d, f) in junk_set
+                    for f in os.listdir(d))}
+    changed = True
+    while changed:
+        changed = False
+        for d in list(alive):
+            p = os.path.dirname(d)
+            if _within(p, copy_path) and p not in alive:
+                alive.add(p)
+                changed = True
+    dirs = [d for d in all_dirs
+            if d not in alive and not in_moved(d)]
+    for d in sorted(dirs, reverse=True):
         ops.append({"op": "rmdir", "src": d, "why": "emptied by merge"})
-    ops.append({"op": "rmdir", "src": copy_path, "why": "emptied by merge"})
+    if copy_path not in alive:
+        ops.append({"op": "rmdir", "src": copy_path, "why": "emptied by merge"})
     notes = [f"primary lives in another run: {pr_run_dir}"] \
         if pr_run_dir != run_dir else []
+    if junk:
+        notes.append(f"{len(junk)} junk file(s) (zips etc.) stay put — "
+                     "brenda never moves or deletes those; their dirs "
+                     "survive the merge on purpose")
     plan = {"id": _new_id(), "kind": "merge", "run": run_dir,
-            "collection": copy_path, "primary": primary_path, "root": root,
+            "collection": copy_path, "primary": primary_path,
+            "primary_root": pr_root, "root": root,
             "ops": ops,
-            "counts": {"quarantined": n_q, "merged": n_m, "rmdir": len(dirs) + 1},
+            "counts": {"quarantined": n_q, "merged": n_m,
+                       "whole_dirs": n_dirs, "rmdir": len(dirs) + (0 if copy_path in alive else 1)},
             "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "status": "planned", "notes": notes}
     _check_sources_exist(plan)
@@ -390,6 +705,9 @@ def apply_plan(plan):
     if plan["status"] != "planned":
         raise ValueError(f"action {plan['id']} is {plan['status']}, "
                          "only planned actions can be applied")
+    if plan["kind"] == "delete":
+        _report, hashes = _load_run(plan["run"])
+        _delete_guard(plan, hashes)      # raises before anything is touched
     done = skipped = 0
     errors = []
     for op in plan["ops"]:
@@ -413,6 +731,13 @@ def apply_plan(plan):
                 if os.path.exists(dst):
                     raise FileExistsError(f"destination exists: {dst}")
                 shutil.move(src, dst)
+            elif kind == "copy_dir":
+                if not os.path.isdir(src):
+                    skipped += 1
+                    continue
+                if os.path.exists(dst):
+                    raise FileExistsError(f"refusing to overwrite: {dst}")
+                shutil.copytree(src, dst, symlinks=True)
             elif kind == "move_dir":
                 if not os.path.isdir(src):
                     skipped += 1
@@ -421,6 +746,13 @@ def apply_plan(plan):
                 if os.path.exists(dst):
                     raise FileExistsError(f"destination exists: {dst}")
                 shutil.move(src, dst)
+            elif kind == "delete_dir":
+                if not os.path.isdir(src):
+                    skipped += 1
+                    continue
+                for _base, _ds, fs in os.walk(src):
+                    done += len(fs)          # receipt: every file that goes
+                shutil.rmtree(src)
             elif kind == "rmdir":
                 # only remove if truly empty right now (the moves above
                 # should have emptied it)
@@ -444,11 +776,29 @@ def apply_plan(plan):
     return plan
 
 
+def discard(action_id):
+    """Throw away a planned action (the confirm never happened). Nothing has
+    been touched on disk, so there is nothing to reverse — the entry stays
+    in the journal for the record."""
+    plan = load_plan(action_id)
+    if plan["status"] != "planned":
+        raise ValueError(f"action {action_id} is {plan['status']} — only "
+                         "planned actions can be discarded")
+    plan["status"] = "discarded"
+    plan["discarded"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _journal("discarded", plan)
+    _save(plan)
+    return plan
+
+
 def undo(action_id):
     """Reverse an applied action using its manifest (reverse op order)."""
     plan = load_plan(action_id)
     if plan["status"] == "undone":
         return plan
+    if plan["kind"] == "delete":
+        raise ValueError("delete is permanent by design — brenda kept no "
+                         "copy to restore")
     if plan["status"] != "applied":
         raise ValueError(f"action {action_id} is {plan['status']} — only "
                          "applied actions can be undone")
@@ -463,9 +813,18 @@ def undo(action_id):
                     os.unlink(dst)                  # brenda-created file
                     _prune_empty_dirs(os.path.dirname(dst),
                                       stop=plan.get("target") or "/")
+            elif kind == "copy_dir":
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)              # brenda-created tree
+                    _prune_empty_dirs(os.path.dirname(dst),
+                                      stop=plan.get("target") or "/")
             elif kind in ("move", "move_dir"):
                 if os.path.exists(dst) and not os.path.exists(src):
                     os.makedirs(os.path.dirname(src), exist_ok=True)
+                    shutil.move(dst, src)
+                elif os.path.exists(dst) and os.path.isdir(src) \
+                        and not os.listdir(src):
+                    os.rmdir(src)               # undo rmdir's empty placeholder
                     shutil.move(dst, src)
                 elif os.path.exists(dst) and os.path.exists(src):
                     errors.append(f"undo move: both exist {src} / {dst}")
@@ -501,10 +860,111 @@ def _prune_empty_dirs(path, stop):
         path = os.path.dirname(path)
 
 
+def _indexed_md5_map(exclude=None):
+    """md5 -> {realpath} across every run's hashes.tsv plus the local index.
+    Paths under the quarantine tree are excluded — quarantined copies must
+    never vouch for each other; only real survivors count. With exclude=DIR,
+    paths under DIR are excluded too (a collection cannot vouch for itself,
+    e.g. when it is the one about to be deleted)."""
+    q_root = quarantine_root()
+    excl_real = os.path.realpath(exclude) if exclude else None
+    md5s = {}
+
+    def add(path, h):
+        if not path or not h:
+            return
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            return
+        if _within(real, q_root):
+            return
+        if excl_real and _within(real, excl_real):
+            return
+        md5s.setdefault(h, set()).add(real)
+
+    runs_root = os.path.join(data_home(), "runs")
+    if os.path.isdir(runs_root):
+        for name in os.listdir(runs_root):
+            hp = os.path.join(runs_root, name, "hashes.tsv")
+            if not os.path.isfile(hp):
+                continue
+            try:
+                with open(hp) as f:
+                    for line in f:
+                        if "\t" in line:
+                            h, p = line.rstrip("\n").split("\t", 1)
+                            add(p, h)
+            except OSError:
+                continue
+    idx_file = os.path.join(data_home(), "index", "local.json")
+    try:
+        with open(idx_file) as f:
+            idx = json.load(f)
+        for sec in idx.get("roots", {}).values():
+            for fp, rec in sec.get("files", {}).items():
+                add(fp, rec.get("md5"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return md5s
+
+
+def _purge_problems(plan, hashes):
+    """AUDIO files in quarantine for this plan whose byte-identical content
+    no longer exists anywhere outside the quarantine tree. Empty list = the
+    music is safe to purge. Only audio is checked — purge never deletes
+    anything else, so nothing else needs a survivor."""
+    q_root = quarantine_root()
+    md5s = _indexed_md5_map()
+    # the plan's own run is the most authoritative source (it hashed exactly
+    # these files) — merge it in, quarantine paths excluded as everywhere else
+    for p, h in hashes.items():
+        real = os.path.realpath(p)
+        if not _within(real, q_root):
+            md5s.setdefault(h, set()).add(real)
+    problems = []
+    for op in plan["ops"]:
+        if op["op"] not in ("move", "move_dir"):
+            continue
+        dst = op["dst"]
+        if not _within(os.path.realpath(dst), q_root):
+            continue
+        if op["op"] == "move":
+            files = [(dst, op["src"])]
+        else:
+            files = []
+            for base, _ds, fs in os.walk(dst):
+                for f in fs:
+                    fq = os.path.join(base, f)
+                    rel = os.path.relpath(fq, dst)
+                    files.append((fq, os.path.join(op["src"], rel)))
+        for fq, orig in files:
+            if not os.path.isfile(fq) or not _is_audio(fq):
+                continue                 # gone already, or not music
+            h = hashes.get(orig)
+            if not h:
+                problems.append(f"{orig}: no md5 recorded in the run's "
+                                "hashes.tsv — cannot verify a survivor")
+                continue
+            if not any(os.path.isfile(p) for p in md5s.get(h, ())):
+                problems.append(f"{orig} (md5 {h[:8]}…): no surviving "
+                                "byte-identical copy outside quarantine")
+    return problems
+
+
 def purge(action_id):
-    """PERMANENTLY delete the quarantined files of an applied quarantine /
+    """PERMANENTLY delete the quarantined MUSIC of an applied quarantine /
     merge / dedupe action. Only possible after apply (you had your review);
-    undo is no longer possible afterwards."""
+    undo is no longer possible afterwards.
+
+    Two protections:
+      - every quarantined audio file must still have a surviving
+        byte-identical copy somewhere outside quarantine (checked against
+        every run's hashes.tsv and the local index, with a real existence
+        test on disk) — otherwise the purge is refused, nothing deleted
+      - non-music files (cover art, playlists, zips…) are NEVER deleted:
+        they stay in quarantine for you to review or keep forever
+    """
     plan = load_plan(action_id)
     if plan["status"] != "applied":
         raise ValueError(f"action {action_id} is {plan['status']} — purge "
@@ -512,7 +972,20 @@ def purge(action_id):
     if plan["kind"] == "import":
         raise ValueError("import actions copy; purge would delete imported "
                          "music — undo instead")
+    if plan["kind"] == "delete":
+        raise ValueError("delete actions removed the directory directly — "
+                         "nothing sits in quarantine to purge")
+    _report, hashes = _load_run(plan["run"])
+    problems = _purge_problems(plan, hashes)
+    if problems:
+        raise ValueError(
+            f"purge refused — {len(problems)} quarantined file(s) have no "
+            f"surviving copy outside quarantine (first: {problems[0]}). "
+            "Nothing was deleted. undo this action, or restore the missing "
+            "copies first. (If the surviving copies live on a drive, make "
+            "sure it is mounted.)")
     removed = 0
+    left = 0
     roots = set()
     for op in plan["ops"]:
         if op["op"] in ("move", "move_dir"):
@@ -522,15 +995,30 @@ def purge(action_id):
         elif op["op"] == "copy":
             continue
     for r in sorted(roots):
-        if os.path.isdir(r):
-            # count files before removal for the receipt
-            for base, _ds, fs in os.walk(r):
-                removed += len(fs)
-            shutil.rmtree(r)
+        if not os.path.isdir(r):
+            continue
+        for base, _ds, fs in os.walk(r, topdown=False):
+            for f in fs:
+                fp = os.path.join(base, f)
+                if _is_audio(fp):
+                    os.unlink(fp)                 # music: verified redundant
+                    removed += 1
+                else:
+                    left += 1                     # art/junk: never deleted
+            try:
+                if not os.listdir(base):
+                    os.rmdir(base)                # only truly-empty dirs go
+            except OSError:
+                pass
     _prune_empty_dirs(os.path.dirname(next(iter(roots))) if roots
                       else quarantine_root(), quarantine_root())
     plan["status"] = "purged"
     plan["result"]["purged_files"] = removed
+    plan["result"]["left_in_quarantine"] = left
+    if left:
+        plan["notes"].append(f"purge deleted only music: {left} non-music "
+                             "file(s) (art/playlists/junk) remain in "
+                             "quarantine for your review")
     _journal("purged", plan)
     _save(plan)
     return plan
@@ -576,10 +1064,18 @@ def self_test():
             f.write(c4)
         with open(os.path.join(b, "Alpha", "01 - One.mp3"), "wb") as f:
             f.write(c1)                       # twin of A's
+        with open(os.path.join(b, "Alpha", "cover.jpg"), "wb") as f:
+            f.write(b"COVER-B-ALPHA")
+        with open(os.path.join(b, "Alpha", "playlist.m3u"), "w") as f:
+            f.write("#EXTM3U\n")
+        with open(os.path.join(b, "Alpha", "junk.zip"), "wb") as f:
+            f.write(b"ZIP-JUNK-STAYS-PUT")
         with open(os.path.join(b, "Beta", "03 - Three.mp3"), "wb") as f:
             f.write(c3)                       # unique
         with open(os.path.join(b, "Beta", "05 - Five.mp3"), "wb") as f:
             f.write(b"BETA-EXTRA")            # keeps B over the min-audio rail
+        with open(os.path.join(b, "Beta", "roadtrip.m3u"), "w") as f:
+            f.write("#EXTM3U\n")
 
         # fake run via frm.analyze + export_run
         cfg = {"dedup": True, "songmatch": True, "workers": 2, "quiet": True,
@@ -597,20 +1093,25 @@ def self_test():
             json.dump({"per_collection": [{"path": b, "new": [newfile],
                                            "new_files": 1}]}, f)
         plan_imp = plan_import(rundir, b, target)
-        check("import plan has 1 copy op",
-              plan_imp["counts"] == {"copy": 1})
+        check("import plan: 1 track + playlist rides, no whole dir "
+              "(05 is not new)",
+              plan_imp["counts"] == {"tracks": 1, "whole_dirs": 0})
         check("import dry: nothing at target", not os.path.exists(target))
         apply_plan(plan_imp)
         check("import applied: file at target preserving structure",
               os.path.isfile(os.path.join(target, "Beta", "03 - Three.mp3")))
+        check("import applied: playlist went along",
+              os.path.isfile(os.path.join(target, "Beta", "roadtrip.m3u")))
         undo(plan_imp["id"])
         check("import undo removed the copy (and empty dirs)",
               not os.path.exists(os.path.join(target, "Beta")))
 
         # --- merge: B into A -----------------------------------------------
         plan = plan_merge(rundir, a, b)
-        check("merge plan: 1 quarantined + 2 merged + 3 rmdir",
-              plan["counts"] == {"quarantined": 1, "merged": 2, "rmdir": 3})
+        check("merge plan: 1 quarantined + 4 merged + 1 whole dir, no rmdir "
+              "(junk zip keeps its dir alive)",
+              plan["counts"] == {"quarantined": 1, "merged": 4,
+                                 "whole_dirs": 1, "rmdir": 0})
         check("plan is dry (b untouched)",
               os.path.isfile(os.path.join(b, "Alpha", "01 - One.mp3")))
         apply_plan(plan)
@@ -618,8 +1119,19 @@ def self_test():
               not os.path.exists(os.path.join(b, "Alpha", "01 - One.mp3")))
         check("applied: unique file moved into A/Beta",
               os.path.isfile(os.path.join(a, "Beta", "03 - Three.mp3")))
-        check("applied: B emptied and removed",
-              not os.path.exists(b))
+        check("applied: cover art went along",
+              os.path.isfile(os.path.join(a, "Alpha", "cover.jpg")))
+        check("applied: playlist went along",
+              os.path.isfile(os.path.join(a, "Alpha", "playlist.m3u")))
+        check("applied: whole album dir carried its playlist",
+              os.path.isfile(os.path.join(a, "Beta", "roadtrip.m3u")))
+        check("applied: junk zip NEVER moved",
+              os.path.isfile(os.path.join(b, "Alpha", "junk.zip")))
+        check("applied: B/Beta gone (whole dir moved)",
+              not os.path.exists(os.path.join(b, "Beta")))
+        check("applied: B/Alpha survives holding only the junk",
+              os.path.isdir(os.path.join(b, "Alpha"))
+              and os.listdir(os.path.join(b, "Alpha")) == ["junk.zip"])
         check("quarantine holds the twin",
               any("One.mp3" in f for _r, _d, fs in
                   os.walk(quarantine_root()) for f in fs))
@@ -629,6 +1141,9 @@ def self_test():
         check("undo: B restored",
               os.path.isfile(os.path.join(b, "Alpha", "01 - One.mp3"))
               and os.path.isfile(os.path.join(b, "Beta", "03 - Three.mp3")))
+        check("undo: art and playlists returned",
+              os.path.isfile(os.path.join(b, "Alpha", "cover.jpg"))
+              and os.path.isfile(os.path.join(b, "Beta", "roadtrip.m3u")))
         check("undo: A/Beta file returned",
               not os.path.exists(os.path.join(a, "Beta", "03 - Three.mp3")))
         check("undo: A originals intact",
@@ -637,9 +1152,11 @@ def self_test():
         # --- re-apply then purge ---------------------------------------------
         plan2 = plan_merge(rundir, a, b)
         apply_plan(plan2)
+        qop = next(o for o in plan2["ops"]
+                   if o["dst"].startswith(quarantine_root()))
         purge(plan2["id"])
         check("purge: quarantine merge tree gone",
-              not os.path.exists(os.path.dirname(plan2["ops"][0]["dst"])))
+              not os.path.exists(os.path.dirname(qop["dst"])))
         check("purged action cannot be undone",
               _undo_refuses(plan2["id"]))
 
@@ -663,6 +1180,89 @@ def self_test():
         undo(plan4["id"])
         check("dedupe undo restores the copies",
               os.path.isfile(os.path.join(a2, "Alpha", "01 - One.mp3")))
+
+        # --- purge guard: unique content with no survivor must refuse -------
+        c3 = os.path.join(drive, "solo3", "Music")
+        os.makedirs(os.path.join(c3, "Zulu"))
+        for n, b in (("01 - Only.mp3", b"ONLY-HERE-X"),
+                     ("02 - Only.mp3", b"ONLY-HERE-Y"),
+                     ("03 - Only.mp3", b"ONLY-HERE-Z")):
+            with open(os.path.join(c3, "Zulu", n), "wb") as f:
+                f.write(b)
+        data = frm.analyze(drive, cfg)
+        rundir3 = os.path.join(tmp, "run3")
+        os.makedirs(rundir3)
+        frm.export_run(data, drive, rundir3)
+
+        # whole-dir import: c3/Zulu is entirely new -> one copy_dir op
+        target2 = os.path.join(tmp, "local2")
+        with open(os.path.join(rundir3, "compare.json"), "w") as f:
+            json.dump({"per_collection": [{"path": c3, "new": [
+                os.path.join(c3, "Zulu", "01 - Only.mp3"),
+                os.path.join(c3, "Zulu", "02 - Only.mp3"),
+                os.path.join(c3, "Zulu", "03 - Only.mp3")],
+                "new_files": 3}]}, f)
+        plan6 = plan_import(rundir3, c3, target2)
+        check("import: whole dir when everything in it is new",
+              plan6["counts"] == {"tracks": 3, "whole_dirs": 1})
+        apply_plan(plan6)
+        check("whole-dir import landed complete",
+              os.path.isfile(os.path.join(target2, "Zulu", "01 - Only.mp3")))
+        undo(plan6["id"])
+        check("whole-dir import undo removed the tree (target dir itself "
+              "correctly remains, empty)",
+              os.path.isdir(target2)
+              and not os.path.exists(os.path.join(target2, "Zulu")))
+
+        plan5 = plan_quarantine(rundir3, c3)
+        apply_plan(plan5)
+        refused = False
+        try:
+            purge(plan5["id"])
+        except ValueError:
+            refused = True
+        check("purge refused: quarantined file has no surviving twin",
+              refused)
+        check("refused purge left the quarantine intact (nothing deleted)",
+              os.path.isfile(os.path.join(plan5["ops"][0]["dst"], "Zulu",
+                                          "01 - Only.mp3")))
+        undo(plan5["id"])
+
+        # --- delete: unique content refuses, verified-redundant goes --------
+        refused = False
+        try:
+            plan_delete(rundir3, c3)          # all content unique -> refuse
+        except ValueError:
+            refused = True
+        check("delete refused: unique music, no survivors elsewhere", refused)
+        check("refused delete left the collection intact",
+              os.path.isfile(os.path.join(c3, "Zulu", "01 - Only.mp3")))
+        c4 = os.path.join(drive, "dup4", "Music")
+        os.makedirs(os.path.join(c4, "Alpha"))
+        for n in ("01 - One.mp3", "02 - Two.mp3", "04 - Four.mp3"):
+            shutil.copy(os.path.join(a, "Alpha", n),
+                        os.path.join(c4, "Alpha", n))
+        with open(os.path.join(c4, "Alpha", "cover.jpg"), "wb") as f:
+            f.write(b"COVER-C4")
+        data = frm.analyze(drive, cfg)
+        rundir4 = os.path.join(tmp, "run4")
+        os.makedirs(rundir4)
+        frm.export_run(data, drive, rundir4)
+        plan7 = plan_delete(rundir4, c4)      # twins of A -> safe to delete
+        check("delete plan counts music + non-music",
+              plan7["counts"]["audio_files"] == 3
+              and plan7["counts"]["non_music"] == 1)
+        apply_plan(plan7)
+        check("applied delete: directory gone",
+              not os.path.exists(c4))
+        check("applied delete: originals elsewhere untouched",
+              os.path.isfile(os.path.join(a, "Alpha", "01 - One.mp3")))
+        refused = False
+        try:
+            undo(plan7["id"])
+        except ValueError:
+            refused = True
+        check("delete has no undo", refused)
 
         check("actions.log exists and has entries",
               os.path.isfile(log_path())

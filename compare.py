@@ -512,7 +512,7 @@ def run_cli(argv=None):
     print(f"Output: {out}", file=sys.stderr)
     print(f"  HTML:  {html_path}", file=sys.stderr)
     if not args.no_open:
-        os.system("xdg-open " + frm.shlex_quote(html_path))
+        frm.gui_open(html_path)
     return 0
 
 

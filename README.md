@@ -11,7 +11,9 @@ brenda is three tools in one keyboard-friendly command:
 | command | what it does |
 |---|---|
 | `brenda scan [DRIVE]` | finds every `Music` directory on a drive, classifies it
-(collection vs android copy vs wine boilerplate vs cache…), hashes the audio,
+(collection vs android copy vs wine boilerplate vs cache…), hashes the audio
+(persistent hash cache — unchanged files are never re-hashed, so a re-scan
+of a mostly-intact drive is fast),
 finds byte-identical duplicates, detects whole-directory mirror copies, and
 matches the *same songs* across collections even when the format differs
 (FLAC vs MP3). Writes a pretty HTML report (+ Markdown + JSON) and opens it. |
@@ -68,6 +70,8 @@ runs/<time>-<drive>/   report.{html,md,json} + hashes.tsv + file lists
                        (+ compare.{html,md,json} after a compare)
 latest -> newest run   # what 'compare' and 'dig' read by default
 index/local.json       # local-music MD5 index (compare's cache)
+hashcache.tsv          # drive-file MD5 cache (size+mtime keyed) — re-scans
+                       # only hash new/changed files
 playlists/             # .m3u files from dig
 bpm_cache.tsv          # md5-keyed BPM cache
 ```
@@ -103,13 +107,37 @@ in your browser.
 
 ## Requirements
 
-- Linux, python 3.8+ (standard library only for scan + compare)
+- python 3.8+ (standard library only for scan + compare — that is also what
+  makes brenda portable: clone + python, no packages, no exes)
 - `dig` additionally needs `python3-mutagen` (always) and `python3-aubio` +
   `ffmpeg` (only to compute BPM for tracks not already in the cache — a
   fully-cached dig runs without them). `install.sh --extras` handles Debian;
   other distros' commands are printed on request.
-- Any DE or WM — brenda is a terminal tool; the only "GUI" is `xdg-open`
-  handing the report to your browser
+- Any DE or WM — brenda is a terminal tool; the only "GUI" is opening the
+  report in your browser
+
+## Other systems
+
+brenda is written OS-neutral (pure python stdlib); the OS-specific bits
+(drive detection, open-folder, notifications, data home) adapt at runtime.
+
+- **Linux** — everything, natively. Any mounted filesystem (ext4, NTFS via
+  ntfs3/ntfs-3g, FAT, exFAT…) scans fine.
+- **Windows** — `install.ps1`: needs `python` on PATH, runs the self-test,
+  writes a `brenda.cmd` shim. NTFS/FAT/exFAT drives work natively. For ext4
+  disks the installer goes **automagic via WSL2**: if WSL2 is present it
+  clones brenda inside the distro, runs the self-test there, and writes a
+  `brenda-wsl.ps1` — plug in the ext4 drive, run it, it mounts the disk
+  read-write, starts `brenda serve`, and opens the dashboard on Windows
+  (one USB drive = zero questions). If WSL2 is missing you get the one-time
+  `wsl --install --no-launch` line (it needs a reboot, so it asks instead
+  of doing it). DiskInternals Linux Reader is a read-only alternative for
+  scanning through Windows itself.
+- **macOS** — clone and run `python3 brenda …`; drives appear from /Volumes
+  (APFS/HFS+/FAT/exFAT; NTFS read-only natively). Data home: `~/Library/
+  Application Support/brenda`. Notifications via osascript.
+- Actions (merge/import/quarantine/delete) behave identically on all three —
+  so do the safety guards: nothing is deleted without verification.
 
 ## The dashboard — `brenda serve`
 
@@ -120,10 +148,11 @@ brenda serve        # one command; opens the dashboard in your browser
 One page, always open: every scan run in the data home, newest first, each
 collection with its **compare numbers against everything brenda has ever
 indexed** — plus a dropdown per run: *compare to …* any other drive's scan,
-or the local home, or everything. The page re-checks itself every few
-seconds: keep scanning drives, leave the browser open — new runs appear on
-their own. Actions need the drive mounted (unplugged runs show it and their
-cached compare numbers stay visible).
+or the local home, or everything. Each run's **full report is inline**
+(collapsible — the dashboard and the report are one merged page). The page
+re-checks itself every few seconds: keep scanning drives, leave the browser
+open — new runs appear on their own. Actions need the drive mounted (unplugged
+runs show it and their cached compare numbers stay visible).
 
 Buttons, all through the scenic route (**plan = dry-run preview → confirm →
 apply → undo**, purge only after you've reviewed the quarantine folder):
@@ -132,12 +161,12 @@ apply → undo**, purge only after you've reviewed the quarantine folder):
 |---|---|
 | `scan + compare` | scan any detected drive, then compare it — no CLI needed |
 | `compare to …` | diff this run against a specific other scan / home / everything |
-| `import N new` | copy the run's new-to-you tracks into the target dir (structure preserved) |
+| `import N new` | copy (or **move** — your choice) the run's new-to-you tracks into the target dir; an artist/album dir that is entirely new goes over whole, cover art and playlists ride along; zips/junk are never copied or moved |
 | `quarantine collection` | move a confirmed-redundant collection into reviewable quarantine |
-| `merge into …` | merge a twin into a primary — byte-identical files → quarantine, unique files → moved in, emptied dirs → removed; works **across drives** |
+| `merge into …` | merge a twin into a primary — byte-identical files → quarantine, unique files → moved in (whole artist/album dirs in one piece when they're entirely unique; cover art and playlists ride along; zips/junk stay put, so their dirs survive on purpose); works **across drives** |
 | `plan dedupe` | within one run: keep the first copy of each byte-duplicate, quarantine the rest |
 | `open folder` | eyeball the collection (or the quarantine) in your file manager |
-| undo / purge | reverse an applied action — or, after review, permanently delete its quarantined files |
+| undo / purge | reverse an applied action — or, after review, permanently delete its quarantined **music**: purge first re-verifies every quarantined audio file still has a surviving byte-identical copy elsewhere (if not, it refuses and deletes nothing), and it never deletes anything that isn't music — cover art, playlists and junk stay in quarantine for you to review or keep |
 
 Safety model: the server binds 127.0.0.1 on a random port behind a random
 URL token; mutations are POST-only and dry-run-planned first; nothing is
