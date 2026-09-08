@@ -440,8 +440,12 @@ def _collection_block(run, c, coll_pairs, show_nums=True, events=None):
             "<th class='num'>audio</th><th class='num'>size</th>"
             "<th class='num' title='zips, docs, unknown files — brenda never "
             "moves or deletes these'>non-music</th>"
-            "<th class='num'>have</th><th class='num'>variant</th>"
-            "<th class='num'>new</th></tr>"
+            "<th class='num' title='byte-identical copies found in the "
+            "compared index (see the run&apos;s compare vs line)'>have</th>"
+            "<th class='num' title='same song, different bytes "
+            "(format/encode) in the compared index'>variant</th>"
+            "<th class='num' title='nothing like it exists in the compared "
+            "index'>new</th></tr>"
             f"<tr><td><code>{frm.esc(c['short'])}</code> "
             f"<a class='dim' style='text-decoration:none' title='open this "
             f"folder' href='/{STATE.token}/open?path="
@@ -722,12 +726,16 @@ def dashboard(msg=""):
 </div>""")
     parts.append(
         '<p class="sub">Per collection the numbers mean: <b>have</b> = '
-        "byte-identical copies you already own · <b>variant</b> = same song, "
-        "different format/encode · <b>new</b> = nothing like it in your local "
-        'music. The three decisions: <b>copy new to local</b> = bring the '
-        'missing tracks home · <b>merge into →</b> = collapse a duplicate '
-        'into the keep-copy (identical files → quarantine, unique files move '
-        'in) · <b>quarantine</b> = whole collection off the drive, reviewable. '
+        "byte-identical copies found in the compared index · <b>variant</b> "
+        "= same song, different bytes · <b>new</b> = nothing like it in the "
+        "compared index. What was compared is shown per run ('compare vs') "
+        "— by default the home music plus every drive ever indexed, so a "
+        "song on another backup drive counts as have. For what-is-in-"
+        "~/Music-only numbers, run compare against the local home dir. The "
+        'three decisions: <b>copy new to local</b> = bring the missing '
+        'tracks home · <b>merge into →</b> = collapse a duplicate into the '
+        'keep-copy (identical files → quarantine, unique files move in) · '
+        '<b>quarantine</b> = whole collection off the drive, reviewable. '
         'Everything goes plan → confirm → apply → undo.</p>')
 
     parts.append(_actions_section())
@@ -741,6 +749,13 @@ def dashboard(msg=""):
         parts.append(f"<h2>{frm.esc(os.path.basename(r['root']))}"
                      f" <small class='dim'>{frm.esc(r['root'])} · scanned {frm.esc(r['time'])}</small> {mnt}"
                      f" <small><a href='report/{frm.esc(rid)}'>full report</a></small></h2>")
+        if r["compare"]:
+            roots = r["compare"].get("meta", {}).get("index_roots", [])
+            pretty = ", ".join(
+                "~" if os.path.expanduser("~") == rr else rr for rr in roots)
+            parts.append(f'<p class="sub">the compare numbers below are '
+                         f'against: <b>{frm.esc(pretty or "everything indexed")}'
+                         f'</b> — use "compare to …" above to change that</p>')
         if not r["compare"] or not r["fresh"]:
             against_opts = ['<option value="">everything indexed</option>',
                             '<option value="__home__">the local home dir</option>']
