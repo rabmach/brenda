@@ -52,8 +52,9 @@ Write-Host "python found: $v (via $pyExe)"
 
 Push-Location $PSScriptRoot
 try {
-    & $pyExe @pyRun .\brenda self-test
-    if ($LASTEXITCODE -ne 0) { Write-Error "self-test failed - see above"; exit 1 }
+    # everything the installer prints also lands in install.log - pasteable
+    & $pyExe @pyRun .\brenda self-test 2>&1 | Tee-Object -FilePath install.log
+    if ($LASTEXITCODE -ne 0) { Write-Error "self-test failed - full output is in brenda\install.log"; exit 1 }
 
     $shim = Join-Path $PSScriptRoot "brenda.cmd"
     $pyCall = ("$pyExe " + ($pyRun -join " ")).Trim()

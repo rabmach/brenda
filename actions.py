@@ -268,7 +268,7 @@ def _journal(event, plan):
              "run": plan["run"], "collection": plan.get("collection"),
              "counts": plan["counts"]}
     os.makedirs(os.path.dirname(log_path()), exist_ok=True)
-    with open(log_path(), "a") as f:
+    with open(log_path(), "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
@@ -281,7 +281,7 @@ def _save(plan):
     os.makedirs(actions_dir(), exist_ok=True)
     p = os.path.join(actions_dir(), plan["id"] + ".json")
     tmp = p + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(plan, f, indent=1, sort_keys=True)
     os.replace(tmp, p)
     return p
@@ -291,7 +291,7 @@ def load_plan(action_id):
     p = os.path.join(actions_dir(), action_id + ".json")
     if not os.path.isfile(p):
         raise KeyError(f"no such action: {action_id}")
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -332,15 +332,15 @@ def _load_run(rundir):
     rp = os.path.join(rundir, "report.json")
     if not os.path.isfile(rp):
         raise SystemExit(f"not a brenda/frm run (no report.json): {rundir}")
-    with open(rp) as f:
+    with open(rp, encoding="utf-8") as f:
         report = json.load(f)
     hashes = {}
     hp = os.path.join(rundir, "hashes.tsv")
     if os.path.isfile(hp):
-        with open(hp) as f:
+        with open(hp, encoding="utf-8") as f:
             for line in f:
                 if "\t" in line:
-                    h, p = line.rstrip("\n").split("\t", 1)
+                    h, p = line.rstrip("\r\n").split("\t", 1)
                     hashes[p] = h
     return report, hashes
 
@@ -349,7 +349,7 @@ def _file_list(rundir, collection_path, root):
     rel = frm.dir_short(collection_path, root).replace(os.sep, "__")
     fl = os.path.join(rundir, f"files-{rel}.txt")
     if os.path.isfile(fl):
-        with open(fl) as f:
+        with open(fl, encoding="utf-8") as f:
             return [x for x in f.read().splitlines() if x]
     return []
 
@@ -480,7 +480,7 @@ def _new_files_from_compare(run_dir, collection_path):
     if not os.path.isfile(cp):
         raise ValueError(f"no compare.json in {run_dir} — run "
                          "brenda compare first")
-    with open(cp) as f:
+    with open(cp, encoding="utf-8") as f:
         c = json.load(f)
     for e in c["per_collection"]:
         if e["path"] == collection_path:
@@ -695,7 +695,7 @@ def _find_run_of(collection_path):
         if not os.path.isfile(rp):
             continue
         try:
-            with open(rp) as f:
+            with open(rp, encoding="utf-8") as f:
                 report = json.load(f)
         except json.JSONDecodeError:
             continue
@@ -1279,16 +1279,16 @@ def _indexed_md5_map(exclude=None):
             if not os.path.isfile(hp):
                 continue
             try:
-                with open(hp) as f:
+                with open(hp, encoding="utf-8") as f:
                     for line in f:
                         if "\t" in line:
-                            h, p = line.rstrip("\n").split("\t", 1)
+                            h, p = line.rstrip("\r\n").split("\t", 1)
                             add(p, h)
             except OSError:
                 continue
     idx_file = os.path.join(data_home(), "index", "local.json")
     try:
-        with open(idx_file) as f:
+        with open(idx_file, encoding="utf-8") as f:
             idx = json.load(f)
         for sec in idx.get("roots", {}).values():
             for fp, rec in sec.get("files", {}).items():
@@ -1464,7 +1464,7 @@ def self_test():
             f.write(c1)                       # twin of A's
         with open(os.path.join(b, "Alpha", "cover.jpg"), "wb") as f:
             f.write(b"COVER-B-ALPHA")
-        with open(os.path.join(b, "Alpha", "playlist.m3u"), "w") as f:
+        with open(os.path.join(b, "Alpha", "playlist.m3u"), "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
         with open(os.path.join(b, "Alpha", "junk.zip"), "wb") as f:
             f.write(b"ZIP-JUNK-STAYS-PUT")
@@ -1472,7 +1472,7 @@ def self_test():
             f.write(c3)                       # unique
         with open(os.path.join(b, "Beta", "05 - Five.mp3"), "wb") as f:
             f.write(b"BETA-EXTRA")            # keeps B over the min-audio rail
-        with open(os.path.join(b, "Beta", "roadtrip.m3u"), "w") as f:
+        with open(os.path.join(b, "Beta", "roadtrip.m3u"), "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
 
         # fake run via frm.analyze + export_run
@@ -1487,7 +1487,7 @@ def self_test():
         target = os.path.join(tmp, "local")
         newfile = os.path.join(b, "Beta", "03 - Three.mp3")
         # fabricate compare.json marking the B Beta file as new
-        with open(os.path.join(rundir, "compare.json"), "w") as f:
+        with open(os.path.join(rundir, "compare.json"), "w", encoding="utf-8") as f:
             json.dump({"per_collection": [{"path": b, "new": [newfile],
                                            "new_files": 1}]}, f)
         plan_imp = plan_import(rundir, b, target)
@@ -1596,7 +1596,7 @@ def self_test():
 
         # whole-dir import: c3/Zulu is entirely new -> one copy_dir op
         target2 = os.path.join(tmp, "local2")
-        with open(os.path.join(rundir3, "compare.json"), "w") as f:
+        with open(os.path.join(rundir3, "compare.json"), "w", encoding="utf-8") as f:
             json.dump({"per_collection": [{"path": c3, "new": [
                 os.path.join(c3, "Zulu", "01 - Only.mp3"),
                 os.path.join(c3, "Zulu", "02 - Only.mp3"),
@@ -1826,7 +1826,7 @@ def self_test():
 
         check("actions.log exists and has entries",
               os.path.isfile(log_path())
-              and sum(1 for _ in open(log_path())) >= 8)
+              and sum(1 for _ in open(log_path(), encoding="utf-8")) >= 8)
     finally:
         os.environ.pop("BRENDA_DATA_HOME", None)
         shutil.rmtree(tmp, ignore_errors=True)

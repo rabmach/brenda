@@ -298,9 +298,9 @@ def _load_hash_cache(path):
     """path -> (size, mtime, md5) from the previous scan."""
     cache = {}
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
-                parts = line.rstrip("\n").split("\t")
+                parts = line.rstrip("\r\n").split("\t")
                 if len(parts) == 4 and parts[3]:
                     cache[parts[0]] = (parts[1], parts[2], parts[3])
     except OSError:
@@ -311,7 +311,7 @@ def _load_hash_cache(path):
 def _save_hash_cache(path, cache):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         for fp in sorted(cache):
             size, mtime, h = cache[fp]
             f.write(f"{fp}\t{size}\t{mtime}\t{h}\n")
@@ -412,7 +412,7 @@ def preseed_hash_cache(root, cache_file=None):
             if not os.path.isfile(rp):
                 continue
             try:
-                with open(rp) as f:
+                with open(rp, encoding="utf-8") as f:
                     m = json.load(f)["meta"]
             except (OSError, json.JSONDecodeError, KeyError):
                 continue
@@ -423,11 +423,11 @@ def preseed_hash_cache(root, cache_file=None):
         return 0
     cache = {}
     try:
-        with open(os.path.join(newest, "hashes.tsv")) as f:
+        with open(os.path.join(newest, "hashes.tsv"), encoding="utf-8") as f:
             for line in f:
                 if "\t" not in line:
                     continue
-                h, fp = line.rstrip("\n").split("\t", 1)
+                h, fp = line.rstrip("\r\n").split("\t", 1)
                 try:
                     st = os.lstat(fp)
                 except OSError:
@@ -753,7 +753,7 @@ def loc(path, root):
 # ---- JSON ----
 
 def render_json(data, outpath):
-    with open(outpath, "w") as f:
+    with open(outpath, "w", encoding="utf-8", newline="\n") as f:
         json.dump(data, f, indent=1, sort_keys=True)
     return outpath
 
@@ -848,7 +848,7 @@ def render_markdown(data, outpath, root):
     L.append("---")
     L.append("*Nothing was deleted, moved, or modified. Full data in the JSON file "
              "alongside this report.*")
-    with open(outpath, "w") as f:
+    with open(outpath, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(L) + "\n")
     return outpath
 
@@ -1127,7 +1127,7 @@ prune; they appear nowhere in this report.</li>
 </ul>
 <footer>frm {esc(m["version"])} — output in JSON + Markdown next to this file.</footer>
 </div></body></html>"""
-    with open(outpath, "w") as f:
+    with open(outpath, "w", encoding="utf-8", newline="\n") as f:
         f.write(doc)
     return outpath
 
@@ -1295,9 +1295,9 @@ def self_test():
             f.write(data3)
         with open(os.path.join(a, "cover.jpg"), "wb") as f:
             f.write(b"JPG")
-        with open(os.path.join(a, "playlist.m3u"), "w") as f:
+        with open(os.path.join(a, "playlist.m3u"), "w", encoding="utf-8") as f:
             f.write("# EXTINF\n")
-        with open(os.path.join(a, ".hidden"), "w") as f:
+        with open(os.path.join(a, ".hidden"), "w", encoding="utf-8") as f:
             f.write("x")
         # nested album: three real songs so it stays listed as nested
         data4 = b"DUMMY-MP3-MADAME"
@@ -1354,7 +1354,14 @@ def self_test():
         check("dev/projects dirs pruned (never scanned)",
               data["meta"]["n_found"] == 8
               and not any("development" in p or "projects" in p for p in found))
-        km = {os.path.relpath(d["path"], root): d["kind"] for d in data["dirs"]}
+        km = {os.path.relpath(d["path"], root).replace(os.sep, "/"):
+              d["kind"] for d in data["dirs"]}
+
+        def s(p):
+            """Separator-agnostic relpath for the checks below (Windows uses
+            backslashes; the literals here are forward-slash)."""
+            return os.path.relpath(p, root).replace(os.sep, "/")
+
         check("wine boilerplate dropped entirely",
               "userD/.wine/drive_c/users/Public/Music" not in km)
         check("android app folder dropped entirely",
@@ -1366,12 +1373,12 @@ def self_test():
         check("classifies nested album", km["userC/Music/Madonna/Music"] == "nested")
         check("classifies mirror copy", km["userB/Music"] == "mirror")
         check("userA stays a collection", km["userA/Music"] == "collection")
-        pairs = {(dir_short(a1, root), dir_short(a2, root)) for a1, a2 in data["mirror_pairs"]}
+        pairs = {(s(a1), s(a2)) for a1, a2 in data["mirror_pairs"]}
         check("mirror pair detected", ("userA/Music", "userB/Music") in pairs
               or ("userB/Music", "userA/Music") in pairs)
         check("mirror pair content-verified",
-              any(("userA/Music", "userB/Music") == (dir_short(x, root), dir_short(y, root))
-                  or ("userB/Music", "userA/Music") == (dir_short(x, root), dir_short(y, root))
+              any(("userA/Music", "userB/Music") == (s(x), s(y))
+                  or ("userB/Music", "userA/Music") == (s(x), s(y))
                   for x, y in data["byte"].get("mirrors_content_verified", [])))
         check("byte dedup finds 7 unique files (nested songs are unique)",
               data["byte"]["unique_files"] == 7)
@@ -1423,14 +1430,14 @@ def export_run(data, root, outdir):
     for d in data_for_json["dirs"]:
         fl = d["audio_files_list"]
         rel = dir_short(d["path"], root).replace(os.sep, "__")
-        with open(os.path.join(outdir, f"files-{rel}.txt"), "w") as ff:
+        with open(os.path.join(outdir, f"files-{rel}.txt"), "w", encoding="utf-8", newline="\n") as ff:
             ff.write("\n".join(fl))
         d.pop("audio_files_list", None)
         dirs_export.append(d)
     data_for_json["dirs"] = dirs_export
 
     if data["byte"]:
-        with open(os.path.join(outdir, "hashes.tsv"), "w") as hf:
+        with open(os.path.join(outdir, "hashes.tsv"), "w", encoding="utf-8", newline="\n") as hf:
             for fp, h in sorted(data["byte"]["hash_by_path"].items()):
                 hf.write(f"{h}\t{fp}\n")
 

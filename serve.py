@@ -55,7 +55,7 @@ class State:
         state_file = os.path.join(frm.data_home(), "serve.state.json")
         self._state_file = state_file
         try:
-            with open(state_file) as f:
+            with open(state_file, encoding="utf-8") as f:
                 d = json.load(f)
             self.target = d.get("target", self.target)
         except (OSError, json.JSONDecodeError):
@@ -76,7 +76,7 @@ class State:
     def save(self):
         """Persist target + live URL (chmod 600 — the URL carries the token)."""
         try:
-            with open(self._state_file, "w") as f:
+            with open(self._state_file, "w", encoding="utf-8", newline="\n") as f:
                 json.dump({"target": self.target, "url": self.url}, f)
             os.chmod(self._state_file, 0o600)
         except OSError:
@@ -90,7 +90,8 @@ class State:
 def _saved_url():
     """URL of a running server, if one was persisted."""
     try:
-        with open(os.path.join(frm.data_home(), "serve.state.json")) as f:
+        with open(os.path.join(frm.data_home(), "serve.state.json"),
+                  encoding="utf-8") as f:
             return json.load(f).get("url")
     except (OSError, json.JSONDecodeError):
         return None
@@ -112,7 +113,7 @@ def _runs():
         if not os.path.isfile(rp):
             continue
         try:
-            with open(rp) as f:
+            with open(rp, encoding="utf-8") as f:
                 report = json.load(f)
         except json.JSONDecodeError:
             continue
@@ -120,7 +121,7 @@ def _runs():
         comp = None
         if os.path.isfile(cp):
             try:
-                with open(cp) as f:
+                with open(cp, encoding="utf-8") as f:
                     comp = json.load(f)
             except json.JSONDecodeError:
                 comp = None
@@ -1146,7 +1147,7 @@ def serve(port=None, no_open=False):
     pidfile = os.path.join(dh, "serve.pid")
     if os.path.isfile(pidfile):
         try:
-            pid = int(open(pidfile).read().strip())
+            pid = int(open(pidfile, encoding="utf-8").read().strip())
             os.kill(pid, 0)
             # already running: open the live dashboard instead of failing
             url = _saved_url()
@@ -1166,7 +1167,7 @@ def serve(port=None, no_open=False):
     s.close()
     port = port or free
     SERVER = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    with open(pidfile, "w") as f:
+    with open(pidfile, "w", encoding="utf-8", newline="\n") as f:
         f.write(str(os.getpid()))
     url = f"http://127.0.0.1:{port}/{STATE.token}/"
     STATE.url = url
@@ -1266,7 +1267,7 @@ def self_test():
 
         coll = os.path.join(drive, "backups", "Music")
         # fabricate compare.json so plan/import has "new" files to work with
-        with open(os.path.join(rundir, "compare.json"), "w") as f:
+        with open(os.path.join(rundir, "compare.json"), "w", encoding="utf-8") as f:
             json.dump({"per_collection": [{"path": coll,
                                            "new": [os.path.join(coll, "Alpha",
                                                             "01 - One.mp3")],
