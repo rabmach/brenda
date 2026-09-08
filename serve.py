@@ -423,35 +423,32 @@ def _action_forms(run, c, new_n, coll_pairs):
 
 
 def _collection_block(run, c, coll_pairs, show_nums=True, events=None):
-    """One collection: path + what-it-is + numbers + the action pills, plus
-    lines announcing what already happened to this collection."""
+    """One collection: a proper two-row table (header row + values row) so
+    the compare numbers render as a real table instead of an inline soup,
+    plus the action pills and event lines announcing what already happened
+    to this collection."""
     nums = _coll_compare(run, c["path"])
     new_n = nums[2] if nums else 0
-    if nums and show_nums:
-        comp = ("<th class='num' style='background:none'>have</th>"
-                "<th class='num' style='background:none'>variant</th>"
-                "<th class='num' style='background:none'>new</th>"
-                f"<td class='num'>{nums[0]:,}</td>"
-                f"<td class='num'>{nums[1]:,}</td>"
-                f"<td class='num'><b>{nums[2]:,}</b></td>")
-    elif show_nums:
-        comp = ("<th class='num' style='background:none'>have</th>"
-                "<th class='num' style='background:none'>variant</th>"
-                "<th class='num' style='background:none'>new</th>"
-                "<td class='num' colspan='3' class='dim'>—</td>")
-    else:
-        comp = ""
-    other = c.get("other", 0)
-    other_txt = (f"<td class='dim' title='zips, docs, unknown files — brenda "
-                 f"never moves or deletes these'>{other:,} non-music "
-                 "(stay put)</td>") if other else ""
-    head = (f"<table><tr><td><code>{frm.esc(c['short'])}</code></td>"
+    head = ("<table><tr>"
+            "<th>collection</th><th>what it is</th>"
+            "<th class='num'>audio</th><th class='num'>size</th>"
+            "<th class='num' title='zips, docs, unknown files — brenda never "
+            "moves or deletes these'>non-music</th>"
+            "<th class='num'>have</th><th class='num'>variant</th>"
+            "<th class='num'>new</th></tr>"
+            f"<tr><td><code>{frm.esc(c['short'])}</code></td>"
             f"<td class='dim'>{frm.esc(c['note'])}</td>"
-            f"<td class='num'>{c['audio']:,} audio</td>"
+            f"<td class='num'>{c['audio']:,}</td>"
             f"<td class='num'>{frm.fmt_bytes(c['bytes'])}</td>"
-            f"{other_txt}{comp}")
+            f"<td class='num'>{c.get('other', 0):,}</td>")
+    if nums:
+        head += (f"<td class='num'>{nums[0]:,}</td>"
+                 f"<td class='num'>{nums[1]:,}</td>"
+                 f"<td class='num'><b>{nums[2]:,}</b></td>")
+    else:
+        head += "<td class='num' colspan='3' class='dim'>— (run compare)</td>"
     if not show_nums:
-        head += f"<td class='num'><b>{new_n:,}</b> new to you</td>"
+        head += f"<td class='num'><b>{new_n:,}</b></td>"
     head += "</tr></table>"
     ev_html = ""
     if run["mounted"] and not os.path.isdir(c["path"]):
@@ -629,7 +626,7 @@ def _actions_section():
                 btns = (f"<form method='post' action='undo'>"
                         f"<input type='hidden' name='id' value='{a['id']}'>"
                         f"<button type='submit'>undo — put it all back</button></form>")
-            if a["kind"] in ("quarantine", "merge", "dedupe"):
+            if a["kind"] in ("quarantine", "merge", "dedupe", "variants"):
                 tgt = frm.esc(_purge_label(a))
                 btns += (f" <form method='post' action='purge' "
                          f"onsubmit=\"return confirm('PURGE: permanently delete the quarantined copies of {tgt}? "
