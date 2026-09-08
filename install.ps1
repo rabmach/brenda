@@ -12,8 +12,12 @@
 #      instead of doing it behind your back).
 # NOTE: this file is intentionally pure ASCII - Windows PowerShell 5.1
 #       misreads UTF-8 scripts without a BOM.
+# NOTE: ErrorActionPreference is "Continue" on purpose - the python self-test
+#       reports progress on stderr, and PS 5.1 turns stderr lines from native
+#       commands into terminating errors under "Stop". Exit codes are checked
+#       explicitly instead.
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 # --- python check + native route -------------------------------------------
 # resolve an interpreter: "python", else the "py" launcher (which is on PATH
@@ -53,7 +57,9 @@ Write-Host "python found: $v (via $pyExe)"
 Push-Location $PSScriptRoot
 try {
     # everything the installer prints also lands in install.log - pasteable
-    & $pyExe @pyRun .\brenda self-test 2>&1 | Tee-Object -FilePath install.log
+    # (stringify so stderr records render as plain lines in the log)
+    & $pyExe @pyRun .\brenda self-test 2>&1 | ForEach-Object { "$_" } |
+        Tee-Object -FilePath install.log
     if ($LASTEXITCODE -ne 0) { Write-Error "self-test failed - full output is in brenda\install.log"; exit 1 }
 
     $shim = Join-Path $PSScriptRoot "brenda.cmd"
