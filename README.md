@@ -138,6 +138,50 @@ brenda is written OS-neutral (pure python stdlib); the OS-specific bits
 - Actions (merge/import/quarantine/delete) behave identically on all three —
   so do the safety guards: nothing is deleted without verification.
 
+## The dual-booter moment — ext4 on Windows
+
+There exists a rare and noble creature: a Linux person who boots into
+Windows for Garmin updates or one stubborn `.exe` and — while there —
+randomly decides that *today* is the day to clean up the music on an
+ext4-formatted backup drive. Windows looks at that drive and sees nothing.
+Old instincts say "reboot to Linux." Brenda says: don't bother.
+
+**One-time setup** (elevated prompt where noted):
+
+1. Windows 10/11 with **WSL2**: `wsl --install --no-launch`, reboot, then a
+   distro (`wsl --install -d Debian`). If the Store refuses you — it
+   refuses LTSC and unactivated boxes with error 0x80072ee7; been there —
+   install the modern WSL msi from `github.com/microsoft/WSL/releases`
+   instead, and fetch files from a host-side `python3 -m http.server` at
+   `http://10.0.2.2:8000/` if the guest's DNS misbehaves.
+2. brenda on the Windows side: clone the repo, `install.cmd`, done. (python
+   from python.org — tick *Add python.exe to PATH*.)
+
+**The moment:**
+
+1. Plug the ext4 drive in. Windows shows nothing — that is correct; Windows
+   cannot read it.
+2. `brenda.cmd scan` — brenda lists the disk by model and says what it is:
+   *ext4 — Windows cannot read it; run: brenda.cmd wslmount*
+3. **Elevated** cmd, in the brenda folder: `brenda.cmd wslmount`. brenda
+   attaches the disk to WSL2 (`--bare`), blkid-verifies the ext4 partition
+   and mounts it at `/mnt/ext4`, starts `brenda serve` from your
+   Windows-side clone, reads the dashboard URL out of `serve.state.json`,
+   and opens it in your Windows browser.
+4. Do the work on the dashboard: **copy new to local**, **merge**,
+   **quarantine** — every action still goes plan → confirm → apply → undo,
+   and purge still refuses to delete anything without a verified surviving
+   copy. Your music never met a blind `rm`.
+5. When done: `wsl --unmount \\.\PHYSICALDRIVE<n>` (brenda prints the exact
+   line). The drive returns to Linux; nothing on it was touched without
+   your say-so.
+
+Notes: while mounted, the drive has one owner (WSL) — Windows Explorer
+cannot see it mid-session, by design. `wslmount` needs an elevated prompt
+(Microsoft's rule for `wsl --mount`) and WSL2 specifically, not version 1.
+Everything stays read-only until *you* press the buttons; the dashboard is
+localhost-only and token-gated, and the journal never sleeps.
+
 ## The dashboard — `brenda serve`
 
 ```sh
