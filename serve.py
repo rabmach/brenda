@@ -330,7 +330,7 @@ form{{display:inline;margin:0}}
 .badge-off{{background:#5e4a2e;color:#f0dfc9}}
 .mnt{{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:700;
 text-transform:uppercase;letter-spacing:.03em}}
-.acts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:8px;margin:8px 0}}
+.acts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:8px;margin:8px 0}}
 .collbox{{background:var(--card2);border:1px solid var(--line);border-radius:12px;
 padding:12px;margin:16px 0}}
 .collbox table{{background:transparent}}
@@ -341,11 +341,11 @@ table.coll th{{font-size:13px;letter-spacing:.04em}}
 table.coll td code{{font-size:15px}}
 table.coll td,table.coll th{{padding:9px 12px}}
 
-.act{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px}}
-.act form{{display:flex;flex-wrap:wrap;gap:6px;align-items:center}}
-.act form button{{flex:1 1 auto;white-space:nowrap}}
-.act select{{flex:1 1 170px;min-width:0}}
-.act .mini{{font-size:12px;color:var(--dim);white-space:nowrap}}
+.act{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:6px 8px}}
+.act form{{display:flex;flex-wrap:wrap;gap:5px;align-items:center}}
+.act form button{{flex:1 1 auto;white-space:nowrap;font-size:12px;padding:7px 8px}}
+.act select{{flex:1 1 170px;min-width:0;font-size:12px}}
+.act .mini{{font-size:11px;color:var(--dim);white-space:nowrap}}
 .act label.mini{{display:inline-flex;align-items:center;gap:4px;cursor:pointer}}
 .evline{{background:var(--card2);border-left:3px solid var(--acc);border-radius:6px;
 padding:6px 10px;margin:4px 0;font-size:13px;color:var(--txt)}}
@@ -454,8 +454,10 @@ def _collection_block(run, c, coll_pairs, show_nums=True, events=None,
                           .get("index_roots", []))
         overlay_line = (f'<div class="evline">numbers = collection-only '
                         f'compare vs <b>{frm.esc(roots or "nothing")}</b> at '
-                        f'{frm.esc(overlay.get("time", "?"))} — the run-wide '
-                        'numbers may differ</div>')
+                        f'{frm.esc(overlay.get("time", "?"))} — have '
+                        f'{nums[0]:,} / variant {nums[1]:,} / new '
+                        f'{nums[2]:,}; copy, move, variants and merge on '
+                        'this card act on THIS list</div>')
     head = ('<table class="coll"><tr>'
             "<th>collection</th><th>what it is</th>"
             "<th class='num'>audio</th><th class='num'>size</th>"
@@ -1121,6 +1123,17 @@ class Handler(BaseHTTPRequestHandler):
                     extra = f" — look in <code>{frm.esc(plan.get('target', ''))}</code>"
                     extra_plain = f" — look in {plan.get('target', '')}"
                 self._redirect(f"<b>Done:</b> {_describe_plan(plan)}{extra}")
+                # after an import/move, the card's numbers are stale - the
+                # moved files are home now. Re-run the collection-only
+                # compare in the background so New drops by what moved.
+                if plan["kind"] == "import" and plan.get("run") \
+                        and plan.get("collection"):
+                    rd = plan["run"]
+                    if os.path.isfile(os.path.join(rd, "coll-compare.json")):
+                        threading.Thread(
+                            target=_bg_coll_compare,
+                            args=(rd, plan["collection"], "home"),
+                            daemon=True).start()
                 verb = {"merge": "APPLIED MERGE",
                         "quarantine": "APPLIED QUARANTINE",
                         "dedupe": "APPLIED DEDUPE",

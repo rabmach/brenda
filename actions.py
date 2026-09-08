@@ -476,15 +476,32 @@ def plan_import(run_dir, collection_path, target, move=False):
 
 
 def _new_files_from_compare(run_dir, collection_path):
+    """The 'new to you' file list for one collection. Prefers the
+    collection-only overlay (coll-compare.json) when it matches - THE CARD
+    THE USER SAW IS THE LIST THE ACTION USES - and falls back to the run's
+    whole-drive compare.json (whose 'new' may differ if other drives were
+    in its index)."""
+    ov_path = os.path.join(run_dir, "coll-compare.json")
+    if os.path.isfile(ov_path):
+        try:
+            with open(ov_path, encoding="utf-8") as f:
+                ov = json.load(f)
+            if ov.get("collection") == collection_path:
+                for e in ov.get("per_collection", []):
+                    if e.get("path") == collection_path:
+                        return e.get("new", [])
+        except (OSError, json.JSONDecodeError):
+            pass
     cp = os.path.join(run_dir, "compare.json")
     if not os.path.isfile(cp):
-        raise ValueError(f"no compare.json in {run_dir} — run "
-                         "brenda compare first")
+        raise ValueError(f"no compare results in {run_dir} - run "
+                         "compare first")
     with open(cp, encoding="utf-8") as f:
         c = json.load(f)
     for e in c["per_collection"]:
         if e["path"] == collection_path:
             return e["new"]
+    raise ValueError(f"collection not in the compare results: {collection_path}")
     raise ValueError(f"collection not in the compare results: {collection_path}")
 
 
@@ -1490,14 +1507,24 @@ def self_test():
         with open(os.path.join(rundir, "compare.json"), "w", encoding="utf-8") as f:
             json.dump({"per_collection": [{"path": b, "new": [newfile],
                                            "new_files": 1}]}, f)
+        # fabricate the collection-only overlay the card was showing: it
+        # says BOTH Beta tracks are new (the whole-drive compare.json said
+        # only 03 - that mismatch is exactly the bug a real import caught)
+        with open(os.path.join(rundir, "coll-compare.json"), "w") as f:
+            json.dump({"collection": b, "meta": {"index_roots": ["/home/x"]},
+                       "per_collection": [{"path": b, "new": [newfile,
+                        os.path.join(b, "Beta", "05 - Five.mp3")]}],
+                       "totals": {}}, f)
         plan_imp = plan_import(rundir, b, target)
-        check("import plan: 1 track + playlist rides, no whole dir "
-              "(05 is not new)",
-              plan_imp["counts"] == {"tracks": 1, "whole_dirs": 0})
+        check("import plan: overlay new-list wins over the stale whole-drive "
+              "compare (Beta becomes all-new -> whole-dir move)",
+              plan_imp["counts"] == {"tracks": 2, "whole_dirs": 1})
         check("import dry: nothing at target", not os.path.exists(target))
         apply_plan(plan_imp)
         check("import applied: file at target preserving structure",
               os.path.isfile(os.path.join(target, "Beta", "03 - Three.mp3")))
+        check("import applied: second overlay-new file moved too",
+              os.path.isfile(os.path.join(target, "Beta", "05 - Five.mp3")))
         check("import applied: playlist went along",
               os.path.isfile(os.path.join(target, "Beta", "roadtrip.m3u")))
         undo(plan_imp["id"])
