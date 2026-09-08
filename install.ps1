@@ -16,21 +16,48 @@
 $ErrorActionPreference = "Stop"
 
 # --- python check + native route -------------------------------------------
-try {
-    $v = & python --version 2>&1
-} catch {
-    Write-Error "python not found on PATH. Install from python.org or: winget install python"
-    exit 1
+# resolve an interpreter: "python", else the "py" launcher (which is on PATH
+# even when python.exe is not)
+$pyExe = $null
+$pyRun = @()
+foreach ($cand in @(@("python"), @("py", "-3"))) {
+    $cmd = Get-Command $cand[0] -ErrorAction SilentlyContinue
+    if ($cmd) { $pyExe = $cand[0]; $pyRun = @($cand | Select-Object -Skip 1); break }
 }
-Write-Host "python found: $v"
+if (-not $pyExe) {
+    Write-Host ""
+    Write-Host "python is not installed (or not on PATH). brenda needs python 3.8+."
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        $ans = Read-Host "Install python now via winget? (Y/n)"
+        if ($ans -match "^[Yy]?$") {
+            winget install -e --id Python.Python.3.13 --override "/quiet InstallAllUsers=0 PrependPath=1"
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host ""
+                Write-Host "python installed. Close this window and double-click"
+                Write-Host "install.cmd again (PATH refreshes only for NEW terminals)."
+                exit 0
+            }
+        }
+    } else {
+        Write-Host "winget is not available on this Windows - install python by hand:"
+        Write-Host "  1. download: https://www.python.org/downloads/windows/"
+        Write-Host "  2. in the installer tick 'Add python.exe to PATH'"
+        Write-Host "  3. close this window and run install.cmd again"
+        exit 1
+    }
+}
+$v = & $pyExe @pyRun --version 2>&1
+Write-Host "python found: $v (via $pyExe)"
 
 Push-Location $PSScriptRoot
 try {
-    & python .\brenda self-test
+    & $pyExe @pyRun .\brenda self-test
     if ($LASTEXITCODE -ne 0) { Write-Error "self-test failed - see above"; exit 1 }
 
     $shim = Join-Path $PSScriptRoot "brenda.cmd"
-    Set-Content -Path $shim -Value "@echo off`r`npython `"%~dp0brenda`" %*" -Encoding ASCII
+    $pyCall = ("$pyExe " + ($pyRun -join " ")).Trim()
+    Set-Content -Path $shim -Value "@echo off`r`n$pyCall `"%~dp0brenda`" %*" -Encoding ASCII
     Write-Host ""
     Write-Host "wrote $shim"
     Write-Host "native use (NTFS/FAT/exFAT):  .\brenda.cmd scan D:\    .\brenda.cmd serve"
