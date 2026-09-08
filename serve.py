@@ -30,6 +30,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -685,6 +686,10 @@ def _actions_section():
                          f"<input type='hidden' name='id' value='{a['id']}'>"
                          f"<button class='warn' type='submit' title='deletes the parked copies in ~/.local/share/brenda/quarantine - the drive collection is not touched'>"
                          f"purge quarantine: {tgt}</button></form>")
+        elif st == "applying":
+            badge = ('<span class="mnt badge-ok">applying now — progress on '
+                     'the banner</span>')
+            btns = ""
         elif st == "undone":
             badge = '<span class="mnt badge-ok">undone</span>'
         elif st == "discarded":
@@ -1111,6 +1116,21 @@ class Handler(BaseHTTPRequestHandler):
                     form["collection"])
                 self._send(confirm_page(plan))
             elif route == "apply":
+                probe = actions.load_plan(form["id"])
+                if probe["status"] == "applying":
+                    self._redirect("that action is already applying — "
+                                   "watch the banner")
+                    return
+                if len(probe.get("ops", [])) > 60:
+                    # big plan: run it in the background with live progress
+                    probe["status"] = "applying"
+                    actions._save(probe)
+                    threading.Thread(target=_bg_apply,
+                                     args=(form["id"],), daemon=True).start()
+                    self._redirect(f"applying {len(probe['ops'])} ops in the "
+                                   "background — the banner counts them "
+                                   "down; the page keeps refreshing")
+                    return
                 plan = actions.apply_plan(actions.load_plan(form["id"]))
                 extra = ""
                 extra_plain = ""
@@ -1251,6 +1271,60 @@ def _bg_coll_compare(run_dir, collection, against):
         STATE.job_end(f"collection compare FAILED: {e}")
         STATE.status["fail"] = f"collection compare FAILED: {e}"
         print(f"serve: collection compare FAILED: {e}", file=sys.stderr)
+
+
+def _bg_apply(action_id):
+    """Background apply for big plans: holds the mutation lock, reports
+    per-op progress on the banner, fires the notification when done."""
+    got = False
+    for _ in range(50):                    # wait out the POST's busy hold
+        if STATE.busy.acquire(blocking=False):
+            got = True
+            break
+        time.sleep(0.2)
+    if not got:
+        print("serve: apply could not start - busy", file=sys.stderr)
+        return
+    try:
+        plan = actions.load_plan(action_id)
+        total = len(plan.get("ops", []))
+        STATE.job_start("apply", f"applying {action_id}: 0/{total} ops")
+        plan = actions.apply_plan(
+            plan, progress=lambda done, _t: STATE.job_label(
+                f"applying {action_id}: {done:,}/{total:,} ops"),
+            resume=True)
+        res = plan.get("result", {})
+        msg = (f"applied {plan['id']}: {res.get('done', 0):,} op(s) done, "
+               f"{res.get('skipped', 0):,} skipped"
+               + (f", {len(res.get('errors', []))} FAILED" if res.get("errors")
+                  else ""))
+        STATE.job_end(msg)
+        if res.get("errors"):
+            STATE.status["fail"] = (f"{len(res['errors'])} op(s) FAILED — "
+                                    f"detail in brenda\\actions/"
+                                    f"{plan['id']}.json" if sys.platform
+                                    .startswith("win") else
+                                    f"{len(res['errors'])} op(s) FAILED — "
+                                    f"see ~/.local/share/brenda/actions/"
+                                    f"{plan['id']}.json")
+        else:
+            STATE.status["fail"] = None
+        _notify(msg, title=f"brenda — APPLIED {plan['kind'].upper()}")
+        print(f"serve: {msg}", file=sys.stderr)
+        if plan["kind"] == "import" and plan.get("run") \
+                and plan.get("collection") \
+                and os.path.isfile(os.path.join(plan["run"],
+                                                "coll-compare.json")):
+            threading.Thread(target=_bg_coll_compare,
+                             args=(plan["run"], plan["collection"], "home"),
+                             daemon=True).start()
+    except Exception as e:                           # noqa: BLE001
+        STATE.job_end(f"apply FAILED: {e}")
+        STATE.status["fail"] = f"apply FAILED: {e}"
+        _notify(f"apply FAILED: {e}", title="brenda — apply FAILED")
+        print(f"serve: apply FAILED: {e}", file=sys.stderr)
+    finally:
+        STATE.busy.release()
 
 
 def _bg_with_msg(mount):

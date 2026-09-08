@@ -1077,10 +1077,24 @@ def _check_sources_exist(plan):
 # apply / undo / purge
 # --------------------------------------------------------------------------
 
-def apply_plan(plan):
-    """Execute the ops in order. Missing sources are skipped (noted). Returns
-    the updated plan."""
-    if plan["status"] != "planned":
+def apply_plan(plan, progress=None, resume=False):
+    """Execute the ops in order. Missing sources are skipped (noted).
+
+    Speed: consecutive plain file ops (copy/move with no swap guards) run
+    through a small worker pool - parallel I/O overlaps the source drive's
+    seek latency, which is what made big imports glacial. Order-sensitive
+    ops (dir moves, keeper/swap pairs, rmdirs) stay sequential. It is safe
+    to interrupt (Ctrl+C/restart) mid-apply: done ops stay done, the rest
+    re-apply on the next go.
+
+    progress(done, total) reports advancement for live banners.
+    resume=True admits a plan already marked 'applying' (a background apply
+    re-entering itself)."""
+    if plan["status"] == "applying":
+        if not resume:
+            raise ValueError(f"action {plan['id']} is already applying — "
+                             "watch the banner")
+    elif plan["status"] != "planned":
         raise ValueError(f"action {plan['id']} is {plan['status']}, "
                          "only planned actions can be applied")
     if plan["kind"] == "delete":
@@ -1089,20 +1103,75 @@ def apply_plan(plan):
     done = skipped = 0
     errors = []
     renamed = 0
-    for op in plan["ops"]:
+    ops = plan["ops"]
+    total = len(ops)
+
+    def run_one(op):
+        """Execute one pool-able op; returns (state, err)."""
         kind = op["op"]
         src = op.get("src")
         dst = op.get("dst")
-        try:
-            if kind == "copy":
-                if not os.path.isfile(src):
+        if kind == "move":
+            if not os.path.exists(src):
+                return "skipped", None
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if os.path.exists(dst):
+                old = dst
+                dst = _collision_free(dst)
+                op["dst"] = dst
+                for other in ops:
+                    if other.get("keeper") == old:
+                        other["keeper"] = dst
+                return "renamed", None
+            shutil.move(src, dst)
+            return "done", None
+        if kind == "copy":
+            if not os.path.isfile(src):
+                return "skipped", None
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if os.path.exists(dst):
+                raise FileExistsError(f"refusing to overwrite: {dst}")
+            shutil.copy2(src, dst, follow_symlinks=False)
+            return "done", None
+        return "inline", None
+
+    def drain(batch, out):
+        """Run a batch of plain ops in parallel; journal the results."""
+        nonlocal done, skipped, renamed
+        if not batch:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futs = {ex.submit(run_one, op): op for op in batch}
+            for fut, op in futs.items():
+                state, err = fut.result()
+                if state == "skipped":
                     skipped += 1
-                    continue
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                if os.path.exists(dst):
-                    raise FileExistsError(f"refusing to overwrite: {dst}")
-                shutil.copy2(src, dst, follow_symlinks=False)
-            elif kind == "move":
+                elif state == "renamed":
+                    renamed += 1
+                    done += 1
+                elif err:
+                    out.append(f"{op['op']} {op.get('src')}: {err}")
+                else:
+                    done += 1
+        batch.clear()
+        if progress:
+            progress(done, total)
+
+    batch = []
+    for op in ops:
+        kind = op["op"]
+        if kind in ("copy", "move") and not op.get("if_src") \
+                and not op.get("if_dst") and not op.get("keeper"):
+            batch.append(op)
+            if len(batch) >= 24:
+                drain(batch, errors)
+            continue
+        drain(batch, errors)               # drain before any special op
+        src = op.get("src")
+        dst = op.get("dst")
+        try:
+            if kind == "move":
                 # paired swap: proceed only if the replacement still exists
                 # at either end of its own move (it may not have landed —
                 # drive changed since the plan — then keep the replaced file)
@@ -1123,11 +1192,12 @@ def apply_plan(plan):
                     old = dst
                     dst = _collision_free(dst)
                     op["dst"] = dst
-                    for other in plan["ops"]:
+                    for other in ops:
                         if other.get("keeper") == old:
                             other["keeper"] = dst
                     renamed += 1
                 shutil.move(src, dst)
+                done += 1
             elif kind == "copy_dir":
                 if not os.path.isdir(src):
                     skipped += 1
@@ -1135,6 +1205,7 @@ def apply_plan(plan):
                 if os.path.exists(dst):
                     raise FileExistsError(f"refusing to overwrite: {dst}")
                 shutil.copytree(src, dst, symlinks=True)
+                done += 1
             elif kind == "move_dir":
                 if not os.path.isdir(src):
                     skipped += 1
@@ -1144,11 +1215,12 @@ def apply_plan(plan):
                     old = dst
                     dst = _collision_free(dst)
                     op["dst"] = dst
-                    for other in plan["ops"]:
+                    for other in ops:
                         if other.get("keeper") == old:
                             other["keeper"] = dst
                     renamed += 1
                 shutil.move(src, dst)
+                done += 1
             elif kind == "delete_dir":
                 if not os.path.isdir(src):
                     skipped += 1
@@ -1164,9 +1236,11 @@ def apply_plan(plan):
                 # a non-empty rmdir is not an error — notes below
             else:
                 raise ValueError(f"unknown op kind: {kind}")
-            done += 1
+            if progress:
+                progress(done, total)
         except Exception as e:                      # noqa: BLE001 — journal it
             errors.append(f"{kind} {src}: {e}")
+    drain(batch, errors)                           # tail batch
     plan["status"] = "applied"
     plan["applied"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     plan["result"] = {"done": done, "skipped": skipped, "errors": errors[:50]}
