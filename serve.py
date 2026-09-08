@@ -330,8 +330,11 @@ form{{display:inline;margin:0}}
 .badge-off{{background:#5e4a2e;color:#f0dfc9}}
 .mnt{{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:700;
 text-transform:uppercase;letter-spacing:.03em}}
-.act{{display:inline-flex;align-items:center;gap:8px;background:var(--card);
-border:1px solid var(--line);border-radius:10px;padding:6px 10px}}
+.acts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:8px;margin:8px 0}}
+.act{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px}}
+.act form{{display:flex;flex-wrap:wrap;gap:6px;align-items:center}}
+.act form button{{flex:1 1 auto;white-space:nowrap}}
+.act select{{flex:1 1 170px;min-width:0}}
 .act .mini{{font-size:12px;color:var(--dim);white-space:nowrap}}
 .act label.mini{{display:inline-flex;align-items:center;gap:4px;cursor:pointer}}
 .evline{{background:var(--card2);border-left:3px solid var(--acc);border-radius:6px;
@@ -369,10 +372,10 @@ def _coll_compare(run, coll_path):
 
 
 def _action_forms(run, c, new_n, coll_pairs):
-    """The three decisions per collection + open folder, as one row of
-    forms. Absolute token URLs, so the identical HTML works both on the
-    dashboard and injected into the served report page. Every control sits
-    in a labeled pill, so nothing has to be guessed."""
+    """The decision grid for one collection: five uniform cells — copy to
+    local, merge into, quarantine, variants, delete. Absolute token URLs so
+    the HTML also works inside the inlined report. open-folder lives on the
+    collection name (a link, not another button)."""
     t = STATE.token
     rid = run["id"]
     alive = bool(run["mounted"] and os.path.isdir(c["path"]))
@@ -395,31 +398,24 @@ def _action_forms(run, c, new_n, coll_pairs):
                     f'directory is redundant, use delete: {short}">'
                     f'all {c["audio"]:,} tracks already indexed</button>')
     return f"""
- <span class="act"><form method="post" action="/{t}/plan/import" onsubmit="return confirm('Plan import of {new_n} new file(s) into {tgt}? Dry run — nothing moves yet.')">
+ <div class="act"><form method="post" action="/{t}/plan/import" onsubmit="return confirm('Plan import of {new_n} new file(s) into {tgt}? Dry run — nothing moves yet.')">
   <input type="hidden" name="run" value="{frm.esc(rid)}">
   <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
   {copy_btn}
-  <label class="mini"><input type="checkbox" name="move" value="1"> move instead</label></form>
-  <small class="dim">&rarr; {tgt}</small></span>
- <span class="act"><small class="dim">merge <code>{short}</code> into:</small>
-  <form method="post" action="/{t}/plan/merge" onsubmit="return confirm('Plan merge of THIS collection into the collection picked in the dropdown? Byte-identical files go to quarantine, unique files + cover art + playlists move into the primary. Junk (zips) never moves. Nothing moves yet — next you get a confirm page with an apply button.')">
+  <label class="mini"><input type="checkbox" name="move" value="1"> move instead</label>
+  <small class="dim">&rarr; {tgt}</small></form></div>
+ <div class="act"><form method="post" action="/{t}/plan/merge" onsubmit="return confirm('Plan merge of THIS collection into the collection picked in the dropdown? Byte-identical files go to quarantine, unique files + cover art + playlists move into the primary. Junk (zips) never moves. Nothing moves yet — next you get a confirm page with an apply button.')">
+  <small class="dim">merge <code>{short}</code> into:</small>
   <input type="hidden" name="copy_run" value="{frm.esc(rid)}">
   <input type="hidden" name="copy" value="{frm.esc(c['path'])}">
   <select name="primary">{''.join(f'<option value="{frm.esc(p)}">{frm.esc(l)}</option>' for p, l in coll_pairs if p != c["path"])}</select>
-  <button {disabled}type="submit">merge &rarr;</button></form></span>
- <span class="act"><form method="post" action="/{t}/plan/quarantine" onsubmit="return confirm('Plan quarantine of this collection? The directory MOVES off the drive into brenda quarantine on your LOCAL disk — reviewable, undo moves it back, nothing is deleted.')">
-  <input type="hidden" name="run" value="{frm.esc(rid)}">
-  <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
-  <button {disabled}class="warn" type="submit">quarantine &rarr; local review folder</button></form></span>
- <span class="act"><form method="post" action="/{t}/plan/variants" onsubmit="return confirm('Plan variant cleanup of THIS collection? One copy per song: lossless beats lossy, then the bigger file. Extra versions move to quarantine — undoable, and purge only works while the kept version exists.')">
-  <input type="hidden" name="run" value="{frm.esc(rid)}">
-  <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
-  <button {disabled}type="submit">variants: keep best per song</button></form></span>
- <span class="act"><form method="post" action="/{t}/plan/delete" onsubmit="return confirm('Plan DELETE of {short}? brenda first verifies every music file here still exists elsewhere; non-music files (art/playlists/zips) go too. PERMANENT — no undo.')">
-  <input type="hidden" name="run" value="{frm.esc(rid)}">
-  <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
-  <button {disabled}class="warn" type="submit">delete: {short}</button></form></span>
- <span class="act"><a style="text-decoration:none" href="/{t}/open?path={urllib.parse.quote(c['path'])}"><button {disabled}type="button">open folder: {short}</button></a></span>"""
+  <button {disabled}type="submit">merge &rarr;</button></form></div>
+ <div class="act"><form method="post" action="/{t}/plan/quarantine" onsubmit="return confirm('Plan quarantine of this collection? The directory MOVES off the drive into brenda quarantine on your LOCAL disk — reviewable, undo moves it back, nothing is deleted.')">
+  <button {disabled}class="warn" type="submit">quarantine &rarr; review folder</button></form></div>
+ <div class="act"><form method="post" action="/{t}/plan/variants" onsubmit="return confirm('Plan variant cleanup of THIS collection? One copy per song: lossless beats lossy, then the bigger file. Extra versions move to quarantine — undoable, and purge only works while the kept version exists.')">
+  <button {disabled}type="submit">variants — keep best per song</button></form></div>
+ <div class="act"><form method="post" action="/{t}/plan/delete" onsubmit="return confirm('Plan DELETE of {short}? brenda first verifies every music file here still exists elsewhere; non-music files (art/playlists/zips) go too. PERMANENT — no undo.')">
+  <button {disabled}class="warn" type="submit">delete: {short} — verified</button></form></div>"""
 
 
 def _collection_block(run, c, coll_pairs, show_nums=True, events=None):
@@ -436,7 +432,10 @@ def _collection_block(run, c, coll_pairs, show_nums=True, events=None):
             "moves or deletes these'>non-music</th>"
             "<th class='num'>have</th><th class='num'>variant</th>"
             "<th class='num'>new</th></tr>"
-            f"<tr><td><code>{frm.esc(c['short'])}</code></td>"
+            f"<tr><td><code>{frm.esc(c['short'])}</code> "
+            f"<a class='dim' style='text-decoration:none' title='open this "
+            f"folder' href='/{STATE.token}/open?path="
+            f"{urllib.parse.quote(c['path'])}'>open &nearr;</a></td>"
             f"<td class='dim'>{frm.esc(c['note'])}</td>"
             f"<td class='num'>{c['audio']:,}</td>"
             f"<td class='num'>{frm.fmt_bytes(c['bytes'])}</td>"
@@ -458,7 +457,7 @@ def _collection_block(run, c, coll_pairs, show_nums=True, events=None):
     for line in (events or {}).get(c["path"], []):
         ev_html += f'<div class="evline">{frm.esc(line)}</div>'
     return (head + ev_html
-            + f'<div class="bar">{_action_forms(run, c, new_n, coll_pairs)}</div>')
+            + f'<div class="acts">{_action_forms(run, c, new_n, coll_pairs)}</div>')
 
 
 # --------------------------------------------------------------------------
