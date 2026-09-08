@@ -43,7 +43,7 @@ def index_path(data_home=None):
 def _load_index(path):
     if not os.path.isfile(path):
         return {"version": 2, "built": None, "roots": {}}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         idx = json.load(f)
     if idx.get("version") == 1:
         # v1 (briefly shipped): flat files dict + root summaries. Partition
@@ -67,7 +67,7 @@ def _load_index(path):
 def _save_index(path, idx):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(idx, f, indent=1, sort_keys=True)
     os.replace(tmp, path)
 
@@ -190,7 +190,7 @@ def load_run(rundir):
     rp = os.path.join(rundir, "report.json")
     if not os.path.isfile(rp):
         raise SystemExit(f"not a brenda/frm run (no report.json): {rundir}")
-    with open(rp) as f:
+    with open(rp, encoding="utf-8") as f:
         report = json.load(f)
     root = report["meta"]["root"]
 
@@ -201,7 +201,7 @@ def load_run(rundir):
         rel = frm.dir_short(d["path"], root).replace(os.sep, "__")
         fl = os.path.join(rundir, f"files-{rel}.txt")
         if os.path.isfile(fl):
-            with open(fl) as f2:
+            with open(fl, encoding="utf-8") as f2:
                 files = [x for x in f2.read().splitlines() if x]
         else:               # fresh run export always writes these; be safe
             files = d.get("audio_files_list", [])
@@ -212,10 +212,10 @@ def load_run(rundir):
     hp = os.path.join(rundir, "hashes.tsv")
     have_hashes = os.path.isfile(hp)
     if have_hashes:
-        with open(hp) as f:
+        with open(hp, encoding="utf-8") as f:
             for line in f:
                 if "\t" in line:
-                    h, p = line.rstrip("\n").split("\t", 1)
+                    h, p = line.rstrip("\r\n").split("\t", 1)
                     hashes[p] = h
     return {"dir": rundir, "root": root, "collections": colls,
             "hashes": hashes, "hashed": have_hashes}
@@ -310,7 +310,7 @@ def render_json(results, run, index, outpath):
         "totals": results["totals"],
         "per_collection": results["per_collection"],
     }
-    with open(outpath, "w") as f:
+    with open(outpath, "w", encoding="utf-8", newline="\n") as f:
         json.dump(out, f, indent=1, sort_keys=True)
     return outpath
 
@@ -409,7 +409,7 @@ the scan uses.</li>
 </ul>
 <footer>brenda compare (frm {frm.esc(frm.VERSION)}) — JSON + Markdown next to this file.</footer>
 </div></body></html>"""
-    with open(outpath, "w") as f:
+    with open(outpath, "w", encoding="utf-8", newline="\n") as f:
         f.write(doc)
     return outpath
 
@@ -447,7 +447,7 @@ def render_markdown(results, run, index, outpath):
         L.append("")
     L.append("---")
     L.append("*Read-only comparison. Nothing was modified.*")
-    with open(outpath, "w") as f:
+    with open(outpath, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(L) + "\n")
     return outpath
 
@@ -512,7 +512,7 @@ def run_cli(argv=None):
     print(f"Output: {out}", file=sys.stderr)
     print(f"  HTML:  {html_path}", file=sys.stderr)
     if not args.no_open:
-        os.system("xdg-open " + frm.shlex_quote(html_path))
+        frm.gui_open(html_path)
     return 0
 
 
@@ -569,7 +569,7 @@ def self_test():
                   "dirs": [
                       {"path": os.path.join(drive, "backup", "Music"),
                        "kind": "collection", "audio_files": 4}]}
-        with open(os.path.join(rundir, "report.json"), "w") as f:
+        with open(os.path.join(rundir, "report.json"), "w", encoding="utf-8") as f:
             json.dump(report, f)
         hashes = {}
         for base, _d, names in os.walk(os.path.join(drive, "backup", "Music")):
@@ -577,12 +577,12 @@ def self_test():
                 p = os.path.join(base, n)
                 with open(p, "rb") as f:
                     hashes[p] = hashlib.md5(f.read()).hexdigest()
-        with open(os.path.join(rundir, "hashes.tsv"), "w") as f:
+        with open(os.path.join(rundir, "hashes.tsv"), "w", encoding="utf-8") as f:
             for p, h in sorted(hashes.items()):
                 f.write(f"{h}\t{p}\n")
         short = frm.dir_short(os.path.join(drive, "backup", "Music"),
                               drive).replace(os.sep, "__")
-        with open(os.path.join(rundir, f"files-{short}.txt"), "w") as f:
+        with open(os.path.join(rundir, f"files-{short}.txt"), "w", encoding="utf-8") as f:
             f.write("\n".join(sorted(hashes)))
 
         idx_file = os.path.join(tmp, "data", "index", "local.json")
@@ -645,7 +645,7 @@ def self_test():
         for p in (rj, rm, rh):
             check(f"render {os.path.basename(p)}",
                   os.path.getsize(p) > 200)
-        with open(rh) as f:
+        with open(rh, encoding="utf-8") as f:
             check("html mentions exact/variant/new",
                   "already have" in f.read())
     finally:

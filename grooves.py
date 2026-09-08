@@ -232,9 +232,9 @@ def detect_bpm(path):
 def load_cache(path):
     cache = {}
     if os.path.isfile(path):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
-                parts = line.rstrip("\n").split("\t")
+                parts = line.rstrip("\r\n").split("\t")
                 if len(parts) == 2:
                     try:
                         cache[parts[0]] = float(parts[1])
@@ -246,7 +246,7 @@ def load_cache(path):
 def save_cache(path, cache):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         for h in sorted(cache):
             f.write(f"{h}\t{cache[h]}\n")
     os.replace(tmp, path)
@@ -261,18 +261,18 @@ def migrate_path_cache(old_cache_path, run_dirs, new_cache_path):
         hp = os.path.join(rd, "hashes.tsv")
         if not os.path.isfile(hp):
             continue
-        with open(hp) as f:
+        with open(hp, encoding="utf-8") as f:
             for line in f:
                 if "\t" not in line:
                     continue
-                h, p = line.rstrip("\n").split("\t", 1)
+                h, p = line.rstrip("\r\n").split("\t", 1)
                 path_md5[p] = h
 
     old = {}
     if os.path.isfile(old_cache_path):
-        with open(old_cache_path) as f:
+        with open(old_cache_path, encoding="utf-8") as f:
             for line in f:
-                parts = line.rstrip("\n").split("\t")
+                parts = line.rstrip("\r\n").split("\t")
                 if len(parts) == 2:
                     try:
                         old[parts[0]] = float(parts[1])
@@ -304,7 +304,7 @@ def migrate_path_cache(old_cache_path, run_dirs, new_cache_path):
 # --------------------------------------------------------------------------
 
 def load_collections(report_json):
-    with open(report_json) as f:
+    with open(report_json, encoding="utf-8") as f:
         r = json.load(f)
     return [
         d["path"] for d in r["dirs"]
@@ -314,11 +314,11 @@ def load_collections(report_json):
 
 def load_md5_map(hashes_tsv):
     m = {}
-    with open(hashes_tsv) as f:
+    with open(hashes_tsv, encoding="utf-8") as f:
         for line in f:
             if "\t" not in line:
                 continue
-            h, path = line.rstrip("\n").split("\t", 1)
+            h, path = line.rstrip("\r\n").split("\t", 1)
             m[path] = h
     return m
 
@@ -464,7 +464,7 @@ def dig(args):
     name = (f"{genres_str}_{fmt_bpm_range(args.bpm_min, args.bpm_max)}_"
             f"{fmt_duration(dur)}_{stamp}.m3u")
     out = os.path.join(args.out, name)
-    with open(out, "w") as f:
+    with open(out, "w", encoding="utf-8", newline="\n") as f:
         f.write("#EXTM3U\n")
         for fp in keep:
             f.write(f"#EXTINF:{track_duration(fp):.0f},"
@@ -540,13 +540,13 @@ def self_test():
 
         # old path-keyed cache + a run's hashes.tsv
         old = os.path.join(tmp, "old_cache.tsv")
-        with open(old, "w") as f:
+        with open(old, "w", encoding="utf-8", newline="\n") as f:
             f.write("/old/path/song1.mp3\t120.5\n")     # will map via hashes
             f.write("/old/path/song2.mp3\t95.0\n")      # unknown path -> drop
             f.write("/old/path/junk.mp3\tNone\n")       # failure -> drop
         rundir = os.path.join(tmp, "runs", "x-drive")
         os.makedirs(rundir)
-        with open(os.path.join(rundir, "hashes.tsv"), "w") as f:
+        with open(os.path.join(rundir, "hashes.tsv"), "w", encoding="utf-8") as f:
             f.write("deadbeef\t/old/path/song1.mp3\n")
         new_cache = os.path.join(tmp, "new", "bpm_cache.tsv")
         m, du, df, col = migrate_path_cache(old, [rundir], new_cache)
@@ -558,7 +558,7 @@ def self_test():
         check("no junk keys", len(c2) == 1)
 
         # collision: existing entry wins, no overwrite
-        with open(old, "w") as f:
+        with open(old, "w", encoding="utf-8", newline="\n") as f:
             f.write("/old/path/song1.mp3\t140.0\n")
         m2, _du2, _df2, col2 = migrate_path_cache(old, [rundir], new_cache)
         check("collision counted, no overwrite", m2 == 0 and col2 == 1

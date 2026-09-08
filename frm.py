@@ -49,6 +49,7 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import shutil
@@ -58,10 +59,19 @@ VERSION = "1.1.0"
 
 
 def data_home():
-    """brenda data home: $BRENDA_DATA_HOME or $XDG_DATA_HOME/brenda."""
+    """brenda data home, per OS:
+    $BRENDA_DATA_HOME wins; Windows %LOCALAPPDATA%/brenda;
+    macOS ~/Library/Application Support/brenda; Linux XDG ~/.local/share."""
     d = os.environ.get("BRENDA_DATA_HOME")
     if d:
         return d
+    if sys.platform.startswith("win"):
+        base = (os.environ.get("LOCALAPPDATA")
+                or os.path.join(os.path.expanduser("~"), "AppData", "Local"))
+        return os.path.join(base, "brenda")
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library",
+                            "Application Support", "brenda")
     xdg = os.environ.get("XDG_DATA_HOME") or os.path.join(
         os.path.expanduser("~"), ".local", "share")
     return os.path.join(xdg, "brenda")
@@ -119,6 +129,9 @@ KIND_COLOR = {
 TRACK_LEAD = re.compile(
     r"^(?:(?:cd|disc|disk)\s*\d{1,3}\s*[-_.]?\s*)?\d{1,3}\s*[-_.]\s*", re.I)
 TRACK_WORD = re.compile(r"^(?:track)\s*\d{1,3}\s*[-_.]?\s*", re.I)
+# brenda's own collision renames ("Song (merged 1).mp3") must not make a
+# copy look like a different song — strip the tag before normalizing
+MERGE_TAG = re.compile(r"\s*\(\s*(?:merged|imported)\s*\d+\s*\)\s*$", re.I)
 SEP = re.compile(r"[\s_.\-]+")
 NONALNUM = re.compile(r"[^a-z0-9 ]")
 
@@ -277,35 +290,154 @@ def _hash_one(fp):
         return fp, None, str(e)
 
 
-def hash_audio_files(file_list, workers, quiet):
-    """MD5 every audio file. Only audio files inside Music dirs are opened."""
+def hash_cache_path():
+    return os.path.join(data_home(), "hashcache.tsv")
+
+
+def _load_hash_cache(path):
+    """path -> (size, mtime, md5) from the previous scan."""
+    cache = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                parts = line.rstrip("\r\n").split("\t")
+                if len(parts) == 4 and parts[3]:
+                    cache[parts[0]] = (parts[1], parts[2], parts[3])
+    except OSError:
+        pass
+    return cache
+
+
+def _save_hash_cache(path, cache):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        for fp in sorted(cache):
+            size, mtime, h = cache[fp]
+            f.write(f"{fp}\t{size}\t{mtime}\t{h}\n")
+    os.replace(tmp, path)
+
+
+def hash_audio_files(file_list, workers, quiet, cache_file=None, progress=None):
+    """MD5 every audio file. Only audio files inside Music dirs are opened.
+
+    With cache_file, files whose size + mtime match the previous scan reuse
+    the stored md5 (only new/changed files are hashed); the cache is then
+    rewritten with fresh metadata — entries for vanished files are dropped.
+    Delete the cache file (or pass --no-hash-cache) to force a full re-hash.
+    progress(done, total) is called while hashing (for live dashboards).
+    """
     hashes, errors = {}, {}
     if not file_list:
         return hashes, errors
-    if workers <= 1 or len(file_list) < 50:
+    cache = _load_hash_cache(cache_file) if cache_file else {}
+    todo = []
+    reused = 0
+    fresh_meta = {}                       # fp -> (size, mtime) as strings
+    for fp in file_list:
+        try:
+            st = os.lstat(fp)
+        except OSError:
+            errors[fp] = "unreadable"
+            continue
+        fresh_meta[fp] = (str(st.st_size), str(st.st_mtime))
+        hit = cache.get(fp)
+        if hit and hit[0] == fresh_meta[fp][0] and hit[1] == fresh_meta[fp][1]:
+            hashes[fp] = hit[2]
+            reused += 1
+        else:
+            todo.append(fp)
+    if cache_file:
+        print(f"  hash cache: {reused} unchanged, {len(todo)} to hash",
+              file=sys.stderr)
+    total = len(todo)
+    if todo and (workers <= 1 or total < 50):
         done = 0
-        for fp in file_list:
+        for fp in todo:
             p, h, e = _hash_one(fp)
             if e:
                 errors[p] = e
             else:
                 hashes[p] = h
             done += 1
+            if progress:
+                progress(done, total)
             if not quiet and done % 250 == 0:
-                print(f"  hashed {done}/{len(file_list)}", file=sys.stderr)
-        return hashes, errors
-    n = min(workers, 8)
-    done = 0
-    with ProcessPoolExecutor(max_workers=n) as ex:
-        for p, h, e in ex.map(_hash_one, file_list, chunksize=16):
-            if e:
-                errors[p] = e
-            else:
-                hashes[p] = h
-            done += 1
-            if not quiet and done % 500 == 0:
-                print(f"  hashed {done}/{len(file_list)}", file=sys.stderr)
+                print(f"  hashed {done}/{total}", file=sys.stderr)
+    elif todo:
+        n = min(workers, 8)
+        done = 0
+        with ProcessPoolExecutor(max_workers=n) as ex:
+            for p, h, e in ex.map(_hash_one, todo, chunksize=16):
+                if e:
+                    errors[p] = e
+                else:
+                    hashes[p] = h
+                done += 1
+                if progress:
+                    progress(done, total)
+                if not quiet and done % 500 == 0:
+                    print(f"  hashed {done}/{total}", file=sys.stderr)
+    if cache_file:
+        new_cache = {}
+        for fp, hit in cache.items():
+            if fp in fresh_meta or not os.path.exists(fp):
+                continue                  # re-hashed/dropped, or vanished
+            new_cache[fp] = hit
+        for fp, h in hashes.items():
+            size, mtime = fresh_meta[fp]
+            new_cache[fp] = (size, mtime, h)
+        try:
+            _save_hash_cache(cache_file, new_cache)
+        except OSError:
+            pass
     return hashes, errors
+
+
+def preseed_hash_cache(root, cache_file=None):
+    """Seed the hash cache from the newest existing run of this same root, so
+    the first scan after upgrading doesn't re-hash a whole drive. Entries are
+    only trusted after a size+mtime check (done lazily on first use — here we
+    just record path -> (size, mtime, md5) for files that still exist).
+    Returns the number of entries seeded (0 = nothing to seed)."""
+    cache_file = cache_file or hash_cache_path()
+    if os.path.exists(cache_file):
+        return 0
+    root = os.path.realpath(root)
+    runs_root = os.path.join(data_home(), "runs")
+    newest = None
+    if os.path.isdir(runs_root):
+        for name in sorted(os.listdir(runs_root), reverse=True):
+            rp = os.path.join(runs_root, name, "report.json")
+            if not os.path.isfile(rp):
+                continue
+            try:
+                with open(rp, encoding="utf-8") as f:
+                    m = json.load(f)["meta"]
+            except (OSError, json.JSONDecodeError, KeyError):
+                continue
+            if os.path.realpath(m.get("root", "")) == root:
+                newest = os.path.join(runs_root, name)
+                break
+    if not newest:
+        return 0
+    cache = {}
+    try:
+        with open(os.path.join(newest, "hashes.tsv"), encoding="utf-8") as f:
+            for line in f:
+                if "\t" not in line:
+                    continue
+                h, fp = line.rstrip("\r\n").split("\t", 1)
+                try:
+                    st = os.lstat(fp)
+                except OSError:
+                    continue
+                cache[fp] = (str(st.st_size), str(st.st_mtime), h)
+    except OSError:
+        return 0
+    if cache:
+        _save_hash_cache(cache_file, cache)
+    return len(cache)
 
 
 # --------------------------------------------------------------------------
@@ -316,6 +448,7 @@ def norm_name(name):
     n = os.path.splitext(name)[0]
     n = TRACK_LEAD.sub("", n)
     n = TRACK_WORD.sub("", n)
+    n = MERGE_TAG.sub("", n)
     n = n.lower()
     n = SEP.sub(" ", n)
     n = NONALNUM.sub("", n)
@@ -424,7 +557,15 @@ def analyze(root, cfg):
         all_audio = []
         for p in top_collections:
             all_audio.extend(stats[p]["audio_files_list"])
-        hashes, hash_errors = hash_audio_files(all_audio, cfg["workers"], cfg["quiet"])
+        cache_file = hash_cache_path() if cfg.get("hash_cache", True) else None
+        if cache_file:
+            seeded = preseed_hash_cache(root, cache_file)
+            if seeded:
+                print(f"  hash cache: seeded {seeded} md5s from an earlier "
+                      f"run of this drive", file=sys.stderr)
+        hashes, hash_errors = hash_audio_files(
+            all_audio, cfg["workers"], cfg["quiet"], cache_file,
+            progress=cfg.get("progress"))
         hash_by_path = hashes
         # group by md5
         by_hash = {}
@@ -612,7 +753,7 @@ def loc(path, root):
 # ---- JSON ----
 
 def render_json(data, outpath):
-    with open(outpath, "w") as f:
+    with open(outpath, "w", encoding="utf-8", newline="\n") as f:
         json.dump(data, f, indent=1, sort_keys=True)
     return outpath
 
@@ -707,7 +848,7 @@ def render_markdown(data, outpath, root):
     L.append("---")
     L.append("*Nothing was deleted, moved, or modified. Full data in the JSON file "
              "alongside this report.*")
-    with open(outpath, "w") as f:
+    with open(outpath, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(L) + "\n")
     return outpath
 
@@ -986,7 +1127,7 @@ prune; they appear nowhere in this report.</li>
 </ul>
 <footer>frm {esc(m["version"])} — output in JSON + Markdown next to this file.</footer>
 </div></body></html>"""
-    with open(outpath, "w") as f:
+    with open(outpath, "w", encoding="utf-8", newline="\n") as f:
         f.write(doc)
     return outpath
 
@@ -996,6 +1137,94 @@ prune; they appear nowhere in this report.</li>
 # --------------------------------------------------------------------------
 
 def list_drives():
+    """Mounted, real (non-virtual, non-network) volumes, per OS.
+    Linux: /proc/mounts. Windows: drive letters via ctypes, skipping
+    CD-ROM and network shares. macOS: /Volumes entries via diskutil."""
+    if sys.platform.startswith("win"):
+        return _list_drives_windows()
+    if sys.platform == "darwin":
+        return _list_drives_mac()
+    return _list_drives_linux()
+
+
+def _linux_disks_windows():
+    """Physical disks holding Linux filesystems (GPT partition type = Linux
+    fs) that Windows has no driver for — the dual-booter's ext4 backup
+    drive, freshly plugged in and invisible to drive-letter enumeration.
+    Returns [(deviceid, model), ...] via a PowerShell CIM query; [] on any
+    trouble (no PowerShell, no such disks, timeout)."""
+    ps = ("Get-CimInstance Win32_DiskDrive | ForEach-Object {"
+          " $d = $_;"
+          " Get-Partition -DiskNumber $d.DiskNumber -ErrorAction SilentlyContinue"
+          " | ForEach-Object { '{0}|{1}|{2}' -f $d.DeviceID, $d.Model, $_.GptType }"
+          " }")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, timeout=25)
+        out = r.stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return []
+    guid = "0fc63daf-8483-4772-8e79-3d69d8477de4"   # Linux filesystem
+    found = []
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.strip().split("|")]
+        if len(parts) == 3 and guid in parts[2].lower():
+            if all(parts[0] != f[0] for f in found):
+                found.append((parts[0], parts[1] or "disk"))
+    return found
+
+
+def _list_drives_windows():
+    out = []
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        bitmask = kernel32.GetLogicalDrives()
+        for i in range(26):
+            if not (bitmask >> i) & 1:
+                continue
+            letter = f"{chr(65 + i)}:\\"
+            dtype = kernel32.GetDriveTypeW(ctypes.c_wchar_p(letter))
+            if dtype in (0, 1, 4, 5):      # unknown, no-root, network, cdrom
+                continue
+            fs = ctypes.create_unicode_buffer(64)
+            kernel32.GetVolumeInformationW(ctypes.c_wchar_p(letter), None, 0,
+                                           None, None, None, fs, 64)
+            out.append((letter, letter, fs.value or "?"))
+    except Exception:                        # noqa: BLE001 — best effort
+        pass
+    # the dual-booter's ext4 drive: present, but unreadable to Windows —
+    # surface it so brenda can explain instead of playing blind
+    for dev, model in _linux_disks_windows():
+        out.append((dev, dev, f"ext4 ({model}) - Windows cannot read it; "
+                              "run: brenda.cmd wslmount"))
+    return out
+
+
+def _list_drives_mac():
+    out = []
+    try:
+        for name in sorted(os.listdir("/Volumes")):
+            mp = os.path.join("/Volumes", name)
+            if not os.path.isdir(mp):
+                continue
+            fs = "?"
+            try:
+                import plistlib
+                import subprocess
+                r = subprocess.run(["diskutil", "info", "-plist", mp],
+                                   capture_output=True, timeout=5)
+                if r.returncode == 0:
+                    fs = plistlib.loads(r.stdout).get("FilesystemType", "?")
+            except Exception:                # noqa: BLE001 — best effort
+                pass
+            out.append(("disk", mp, fs))
+    except OSError:
+        pass
+    return out
+
+
+def _list_drives_linux():
     candidates = []
     system_roots = {"/", "/home", "/boot", "/boot/efi", "/efi", "/dev", "/proc",
                     "/sys", "/run", "/tmp", "/var", "/usr", "/snap", "/opt",
@@ -1019,6 +1248,46 @@ def list_drives():
     except OSError:
         pass
     return candidates
+
+
+def in_wsl():
+    """Running under Windows' WSL2? (env marker, then kernel string)"""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/sys/kernel/osrelease") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def gui_open(path_or_url):
+    """Open a file, folder or URL in the OS-native way (Explorer/Finder/
+    the default browser). Cross-platform; silent False when nothing works.
+    Under WSL2, prefers wslview so things open on the Windows side."""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path_or_url)            # noqa — Windows only
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path_or_url],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        elif in_wsl():
+            try:
+                subprocess.Popen(["wslview", path_or_url],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            except FileNotFoundError:
+                subprocess.Popen(["xdg-open", path_or_url],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", path_or_url],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    except (OSError, AttributeError):
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -1058,9 +1327,9 @@ def self_test():
             f.write(data3)
         with open(os.path.join(a, "cover.jpg"), "wb") as f:
             f.write(b"JPG")
-        with open(os.path.join(a, "playlist.m3u"), "w") as f:
+        with open(os.path.join(a, "playlist.m3u"), "w", encoding="utf-8") as f:
             f.write("# EXTINF\n")
-        with open(os.path.join(a, ".hidden"), "w") as f:
+        with open(os.path.join(a, ".hidden"), "w", encoding="utf-8") as f:
             f.write("x")
         # nested album: three real songs so it stays listed as nested
         data4 = b"DUMMY-MP3-MADAME"
@@ -1117,7 +1386,14 @@ def self_test():
         check("dev/projects dirs pruned (never scanned)",
               data["meta"]["n_found"] == 8
               and not any("development" in p or "projects" in p for p in found))
-        km = {os.path.relpath(d["path"], root): d["kind"] for d in data["dirs"]}
+        km = {os.path.relpath(d["path"], root).replace(os.sep, "/"):
+              d["kind"] for d in data["dirs"]}
+
+        def s(p):
+            """Separator-agnostic relpath for the checks below (Windows uses
+            backslashes; the literals here are forward-slash)."""
+            return os.path.relpath(p, root).replace(os.sep, "/")
+
         check("wine boilerplate dropped entirely",
               "userD/.wine/drive_c/users/Public/Music" not in km)
         check("android app folder dropped entirely",
@@ -1129,12 +1405,12 @@ def self_test():
         check("classifies nested album", km["userC/Music/Madonna/Music"] == "nested")
         check("classifies mirror copy", km["userB/Music"] == "mirror")
         check("userA stays a collection", km["userA/Music"] == "collection")
-        pairs = {(dir_short(a1, root), dir_short(a2, root)) for a1, a2 in data["mirror_pairs"]}
+        pairs = {(s(a1), s(a2)) for a1, a2 in data["mirror_pairs"]}
         check("mirror pair detected", ("userA/Music", "userB/Music") in pairs
               or ("userB/Music", "userA/Music") in pairs)
         check("mirror pair content-verified",
-              any(("userA/Music", "userB/Music") == (dir_short(x, root), dir_short(y, root))
-                  or ("userB/Music", "userA/Music") == (dir_short(x, root), dir_short(y, root))
+              any(("userA/Music", "userB/Music") == (s(x), s(y))
+                  or ("userB/Music", "userA/Music") == (s(x), s(y))
                   for x, y in data["byte"].get("mirrors_content_verified", [])))
         check("byte dedup finds 7 unique files (nested songs are unique)",
               data["byte"]["unique_files"] == 7)
@@ -1186,14 +1462,14 @@ def export_run(data, root, outdir):
     for d in data_for_json["dirs"]:
         fl = d["audio_files_list"]
         rel = dir_short(d["path"], root).replace(os.sep, "__")
-        with open(os.path.join(outdir, f"files-{rel}.txt"), "w") as ff:
+        with open(os.path.join(outdir, f"files-{rel}.txt"), "w", encoding="utf-8", newline="\n") as ff:
             ff.write("\n".join(fl))
         d.pop("audio_files_list", None)
         dirs_export.append(d)
     data_for_json["dirs"] = dirs_export
 
     if data["byte"]:
-        with open(os.path.join(outdir, "hashes.tsv"), "w") as hf:
+        with open(os.path.join(outdir, "hashes.tsv"), "w", encoding="utf-8", newline="\n") as hf:
             for fp, h in sorted(data["byte"]["hash_by_path"].items()):
                 hf.write(f"{h}\t{fp}\n")
 
@@ -1214,6 +1490,9 @@ def main():
                     help="skip MD5 content hashing")
     ap.add_argument("--no-songmatch", action="store_true",
                     help="skip format-agnostic song matching")
+    ap.add_argument("--no-hash-cache", action="store_true",
+                    help="ignore the persistent hash cache — re-hash every "
+                         "audio file from scratch")
     ap.add_argument("--min-audio", type=int, default=MIN_AUDIO_DEFAULT,
                     help="minimum audio files for a Music dir to count as "
                          "a real collection (default: %(default)s)")
@@ -1255,6 +1534,12 @@ def main():
         print(f"Auto-detected drive: {root}", file=sys.stderr)
 
     if not os.path.isdir(root):
+        if root.startswith("\\\\.\\PHYSICALDRIVE"):
+            print(f"{root} holds a Linux filesystem (ext4) - Windows has no "
+                  "driver for it, but brenda can reach it through WSL:",
+                  file=sys.stderr)
+            print("  brenda.cmd wslmount", file=sys.stderr)
+            print("(needs WSL2 and an elevated prompt)", file=sys.stderr)
         print(f"Not a directory: {root}", file=sys.stderr)
         return 1
     if not os.access(root, os.R_OK | os.X_OK):
@@ -1267,11 +1552,13 @@ def main():
         "workers": max(1, args.workers),
         "quiet": args.quiet,
         "min_audio": max(1, args.min_audio),
+        "hash_cache": not args.no_hash_cache,
     }
 
     print(f"frm v{VERSION} — scanning {root}", file=sys.stderr)
     print(f"  dedup={cfg['dedup']} songmatch={cfg['songmatch']} "
-          f"min_audio={cfg['min_audio']} workers={cfg['workers']}", file=sys.stderr)
+          f"min_audio={cfg['min_audio']} workers={cfg['workers']} "
+          f"hash_cache={cfg['hash_cache']}", file=sys.stderr)
 
     data = analyze(root, cfg)
     n = data["meta"]["n_music_dirs"]
@@ -1308,7 +1595,7 @@ def main():
     print(f"  MD:    {os.path.join(outdir, 'report.md')}", file=sys.stderr)
     print(f"  JSON:  {os.path.join(outdir, 'report.json')}", file=sys.stderr)
     if args.open:
-        os.system("xdg-open " + shlex_quote(html_path))
+        gui_open(html_path)
     return 0
 
 

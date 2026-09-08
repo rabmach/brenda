@@ -17,6 +17,7 @@ Data lives in ~/.local/share/brenda/ (or $BRENDA_DATA_HOME):
   runs/<time>-<drive>/   report.{html,md,json} + hashes.tsv + file lists
   latest -> newest run
   index/local.json       local-music MD5 index (for compare)
+  hashcache.tsv          drive-file MD5 cache — re-scans hash only changes
   playlists/             .m3u output of dig
   bpm_cache.tsv          md5-keyed BPM cache (for dig)
 
@@ -27,7 +28,7 @@ their own output directory.
 import os
 import sys
 
-BRENDA_VERSION = "1.1.2"
+BRENDA_VERSION = "2.0.0"
 
 # make sibling imports work no matter how we were invoked (symlink included)
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -47,6 +48,8 @@ usage:
   brenda migrate-cache                old groovin path-keyed bpm cache -> md5
   brenda serve                        live dashboard: all scans, compare-to-…,
                                       import/quarantine/merge buttons
+  brenda wslmount                     (Windows) mount an ext4 disk into WSL
+                                      and scan it there
   brenda self-test                    run all built-in checks
   brenda version                      version numbers
 
@@ -121,6 +124,110 @@ def cmd_migrate_cache(argv):
     return 0
 
 
+def cmd_wslmount(argv):
+    """(Windows) mount a Linux-fs disk into WSL and scan it with brenda.
+    The dual-booter's moment: plug the ext4 drive in, run this elevated,
+    get the dashboard in the Windows browser.
+
+    Field-proven flow (v2, from a real wsl --mount battle):
+      - attach the disk --bare (auto-mount guessing loses to this)
+      - discover the ext4 partition inside WSL and mount it at /mnt/ext4
+        (root session, blkid-verified)
+      - serve runs from the Windows-side clone (via wslpath) as the WSL
+        default user, python3 -B so no pycache lands on /mnt/c
+      - dashboard URL is read from serve.state.json and opened on Windows;
+        WSL's localhost forwarding makes 127.0.0.1 just work"""
+    import subprocess
+    import webbrowser
+    if not sys.platform.startswith("win"):
+        print("wslmount is a Windows command - on Linux, just plug the "
+              "drive in.")
+        return 0
+    disks = frm._linux_disks_windows()
+    if not disks:
+        print("no Linux-fs disks detected (nothing to mount).")
+        return 0
+    if len(disks) == 1 or not argv:
+        dev, model = disks[0]
+    else:
+        print("several Linux-fs disks:")
+        for i, (d, m) in enumerate(disks, 1):
+            print(f"  {i}: {d}  ({m})")
+        pick = input("pick 1-%d: " % len(disks))
+        dev, model = disks[int(pick) - 1]
+
+    print(f"attaching {dev} ({model}) to WSL (--bare)...")
+    subprocess.run(["wsl", "--unmount", dev],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = subprocess.run(["wsl", "--mount", dev, "--bare"])
+    if r.returncode != 0:
+        print("wsl --mount failed - it needs WSL2 and an elevated prompt:")
+        print("  right-click cmd/PowerShell -> Run as administrator, retry")
+        return 1
+
+    # root session: find an unmounted ext4 partition, mount it at /mnt/ext4
+    setup = (
+        "mkdir -p /mnt/ext4; "
+        "P=$(lsblk -rno NAME,TYPE,FSTYPE,MOUNTPOINT "
+        "| awk '$2==\"part\" && $3==\"ext4\" && $4==\"\" {print $1; exit}'); "
+        "if [ -z \"$P\" ]; then echo NOEXT4; exit 1; fi; "
+        "mount -t ext4 /dev/$P /mnt/ext4 && echo MOUNTED_OK /mnt/ext4"
+    )
+    r = subprocess.run(["wsl", "-u", "root", "-e", "bash", "-c", setup],
+                       capture_output=True, text=True)
+    out = (r.stdout or "").strip()
+    if r.returncode != 0 or not out.startswith("MOUNTED_OK"):
+        print("mount inside WSL failed:", out or r.stderr)
+        print("diagnose with:")
+        print(f"  wsl -e bash -lc 'lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT'")
+        print(f"  wsl --unmount {dev}")
+        return 1
+    guest_mp = out.split()[1]
+    print(f"mounted at {guest_mp} inside WSL")
+
+    # serve from THIS clone (the directory brenda.cmd was run from), as the
+    # WSL default user - no second clone, no pycache on /mnt/c
+    repo_win = os.getcwd()
+    r = subprocess.run(["wsl", "-e", "bash", "-lc", f"wslpath '{repo_win}'"],
+                       capture_output=True, text=True)
+    repo = (r.stdout or "").strip()
+    if not repo:
+        print("could not translate the brenda folder into WSL - run "
+              "brenda.cmd from inside your brenda clone.")
+        subprocess.run(["wsl", "-u", "root", "-e", "bash", "-c",
+                        "umount /mnt/ext4 2>/dev/null"])
+        subprocess.run(["wsl", "--unmount", dev])
+        return 1
+
+    print(f"starting brenda serve inside WSL (from {repo})...")
+    serve = (
+        f"rm -rf '{repo}/__pycache__'; cd '{repo}' && "
+        f"exec python3 -B brenda serve --no-open"
+    )
+    subprocess.Popen(["wsl", "-e", "bash", "-lc", serve])
+
+    # wait for the dashboard URL, then open it on Windows
+    url = ""
+    probe = ("for i in 1 2 3 4 5 6 7 8 9 10; do "
+             "grep -o 'http://127.0.0.1:[0-9]*/[a-f0-9]*/' "
+             "$HOME/.local/share/brenda/serve.state.json 2>/dev/null && break; "
+             "sleep 1; done")
+    r = subprocess.run(["wsl", "-e", "bash", "-lc", probe],
+                       capture_output=True, text=True)
+    url = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
+    if url:
+        webbrowser.open(url)
+        print(f"dashboard: {url}  (opened in your Windows browser)")
+    else:
+        print("could not read the dashboard URL - open the one printed by "
+              "serve inside WSL")
+    print("")
+    print("when done:  close the serve session (or: wsl -u root -e bash -c "
+          "'umount /mnt/ext4')")
+    print(f"            wsl --unmount {dev}")
+    return 0
+
+
 def cmd_serve(argv):
     import serve
     return serve.run_cli(argv)
@@ -167,6 +274,8 @@ COMMANDS = {
     "dig": ("genre + BPM playlist from the latest scan", cmd_dig),
     "migrate-cache": ("old groovin bpm cache -> md5-keyed", cmd_migrate_cache),
     "serve": ("live multi-drive dashboard with actions", cmd_serve),
+    "wslmount": ("(Windows) mount a Linux-fs disk into WSL and scan it",
+                 cmd_wslmount),
     "self-test": ("run all built-in checks", cmd_self_test),
     "version": ("print versions", cmd_version),
 }
