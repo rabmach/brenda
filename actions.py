@@ -1721,12 +1721,18 @@ def self_test():
         # --- variants: keep best per song (one copy per song) ---------------
         c6 = os.path.join(drive, "sixsix", "Music")
         os.makedirs(os.path.join(c6, "Artist"))
-        os.makedirs(os.path.join(c6, "artIst"))          # spelling variant
+        # spelling-variant artist dir: Linux (case-sensitive fs) gets a
+        # sibling dir that normalizes to the same song key; Windows
+        # (case-insensitive fs) cannot have both - the variant lives in
+        # Artist there, same grouping either way
+        win = sys.platform == "win32"
+        artdir = os.path.join(c6, "Artist" if win else "artIst")
+        os.makedirs(artdir)
         os.makedirs(os.path.join(c6, "Duo"))
         os.makedirs(os.path.join(c6, "Solo"))
         open(os.path.join(c6, "Artist", "Song.flac"), "wb").write(b"FL" * 500)
         open(os.path.join(c6, "Artist", "Song.mp3"), "wb").write(b"MP3")
-        open(os.path.join(c6, "artIst", "Song.ogg"), "wb").write(b"OGG")
+        open(os.path.join(artdir, "Song.ogg"), "wb").write(b"OGG")
         open(os.path.join(c6, "Duo", "Twin.mp3"), "wb").write(b"TT")
         open(os.path.join(c6, "Duo", "Twin (1).mp3"), "wb").write(b"TT")
         open(os.path.join(c6, "Solo", "Only.mp3"), "wb").write(b"ONLY")
@@ -1753,7 +1759,7 @@ def self_test():
                       if f.endswith(".mp3")]
         check("variants applied: one twin survives, lesser versions gone",
               not os.path.exists(os.path.join(c6, "Artist", "Song.mp3"))
-              and not os.path.exists(os.path.join(c6, "artIst"))
+              and not os.path.exists(os.path.join(artdir, "Song.ogg"))
               and twins_left == ["Twin (1).mp3"])
         pv = purge(planV["id"])               # keepers exist -> allowed
         check("variants purge: verified-by-keeper deletion worked",
