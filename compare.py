@@ -283,9 +283,8 @@ def compare_run(run, index, only_roots=None, collection=None):
                     entry["new_bytes"] += os.lstat(fp).st_size
                 except OSError:
                     entry["new_bytes"] = None   # drive likely unmounted
-                if len(entry["new"]) < 400:
-                    entry["new"].append(fp)
-                new_master.append(fp)
+                entry["new"].append(fp)         # FULL list - actions (copy/
+                new_master.append(fp)           # move) act on this, so no cap
         per_coll.append(entry)
         for k in ("run_files", "exact_files", "variant_files", "new_files"):
             totals[k] += entry[k]
@@ -351,20 +350,20 @@ def render_html(results, run, index, outpath):
     for e in results["per_collection"]:
         if not e["new"]:
             continue
-        shown = len(e["new"])
+        shown = min(len(e["new"]), 400)
         note = str(e["new_files"] - shown) if e["new_files"] > shown else ""
         new_html += (f"<h3>{_html.escape(e['short'])} — "
-                     f"{e['new_files']:,} new</h3>" + file_table(e["new"], note))
+                     f"{e['new_files']:,} new</h3>" + file_table(e["new"][:400], note))
 
     variant_html = ""
     for e in results["per_collection"]:
         if not e["variant"]:
             continue
-        shown = len(e["variant"])
+        shown = min(len(e["variant"]), 400)
         note = str(e["variant_files"] - shown) if e["variant_files"] > shown else ""
         variant_html += (f"<h3>{_html.escape(e['short'])} — "
                          f"{e['variant_files']:,} variants</h3>" +
-                         file_table(e["variant"], note))
+                         file_table(e["variant"][:400], note))
 
     warn = ""
     if not run["hashed"]:
