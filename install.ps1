@@ -1,13 +1,17 @@
-# brenda installer for Windows — no packages, no exe: python + this repo.
+# brenda installer for Windows - no packages, no exe: python + this repo.
 # Needs python 3.8+ on PATH (python.org installer, or: winget install python)
-# Use from the cloned repo folder:  powershell -ExecutionPolicy Bypass -File .\install.ps1
+# Run from the cloned repo folder with:
+#   install.cmd
+# or: powershell -ExecutionPolicy Bypass -File .\install.ps1
 #
 # Two routes, chosen for you:
-#   1. NATIVE — NTFS / FAT / exFAT drives: brenda runs on Windows directly.
-#   2. WSL2  — ext4 backup drives: real read-write ext4 inside WSL2.
+#   1. NATIVE - NTFS / FAT / exFAT drives: brenda runs on Windows directly.
+#   2. WSL2   - ext4 backup drives: real read-write ext4 inside WSL2.
 #      If WSL2 is already installed this is wired up automatically.
 #      If not, you get the one-time command (it needs a reboot, so it asks
 #      instead of doing it behind your back).
+# NOTE: this file is intentionally pure ASCII - Windows PowerShell 5.1
+#       misreads UTF-8 scripts without a BOM.
 
 $ErrorActionPreference = "Stop"
 
@@ -23,7 +27,7 @@ Write-Host "python found: $v"
 Push-Location $PSScriptRoot
 try {
     & python .\brenda self-test
-    if ($LASTEXITCODE -ne 0) { Write-Error "self-test failed — see above"; exit 1 }
+    if ($LASTEXITCODE -ne 0) { Write-Error "self-test failed - see above"; exit 1 }
 
     $shim = Join-Path $PSScriptRoot "brenda.cmd"
     Set-Content -Path $shim -Value "@echo off`r`npython `"%~dp0brenda`" %*" -Encoding ASCII
@@ -40,8 +44,8 @@ try {
     } catch {}
     if ($wslOk) {
         Write-Host ""
-        Write-Host "WSL2 detected — wiring brenda inside the default distro..."
-        wsl -e bash -lc "command -v python3 >/dev/null 2>&1 || { echo 'the WSL distro has no python3 — run: sudo apt install python3'; exit 1; }; test -d $HOME/brenda/.git || git clone https://github.com/rabmach/brenda.git $HOME/brenda; cd $HOME/brenda && git pull -ff 2>/dev/null; python3 brenda self-test"
+        Write-Host "WSL2 detected - wiring brenda inside the default distro..."
+        wsl -e bash -lc "command -v python3 >/dev/null 2>&1 || { echo 'the WSL distro has no python3 - run: sudo apt install python3'; exit 1; }; test -d $HOME/brenda/.git || git clone https://github.com/rabmach/brenda.git $HOME/brenda; cd $HOME/brenda && git pull -ff 2>/dev/null; python3 brenda self-test"
         if ($LASTEXITCODE -eq 0) {
             $shim2 = Join-Path $PSScriptRoot "brenda-wsl.ps1"
             Set-Content -Path $shim2 -Encoding UTF8 -Value @'
@@ -78,7 +82,7 @@ if ($url) { Start-Process $url }
 else { Write-Host "could not read the dashboard URL - open the one printed in the WSL window" }
 Write-Host "brenda is live. When done: close the WSL window, then: wsl --unmount $dev"
 '@
-            Write-Host "wrote $shim2 — plug in the ext4 drive and run:"
+            Write-Host "wrote $shim2 - plug in the ext4 drive and run:"
             Write-Host "    powershell -ExecutionPolicy Bypass -File .\brenda-wsl.ps1"
         }
     } else {
