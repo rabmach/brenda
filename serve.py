@@ -629,11 +629,14 @@ def _actions_section():
             if a["kind"] in ("quarantine", "merge", "dedupe", "variants"):
                 tgt = frm.esc(_purge_label(a))
                 btns += (f" <form method='post' action='purge' "
-                         f"onsubmit=\"return confirm('PURGE: permanently delete the quarantined copies of {tgt}? "
-                         "brenda has verified every file still has a surviving copy elsewhere. "
-                         "This CANNOT be undone — undo only works before the purge.')\">"
+                         f"onsubmit=\"return confirm('PURGE: permanently delete the QUARANTINED copies of {tgt} "
+                         "from ~/.local/share/brenda/quarantine. "
+                         "The collection on the drive is NOT touched - it keeps the kept versions. "
+                         "brenda verified every file still has a surviving copy elsewhere. "
+                         "This CANNOT be undone - undo only works before the purge.')\">"
                          f"<input type='hidden' name='id' value='{a['id']}'>"
-                         f"<button class='warn' type='submit'>purge: {tgt}</button></form>")
+                         f"<button class='warn' type='submit' title='deletes the parked copies in ~/.local/share/brenda/quarantine - the drive collection is not touched'>"
+                         f"purge quarantine: {tgt}</button></form>")
         elif st == "undone":
             badge = '<span class="mnt badge-ok">undone</span>'
         elif st == "discarded":
