@@ -123,16 +123,15 @@ brenda is written OS-neutral (pure python stdlib); the OS-specific bits
 
 - **Linux** — everything, natively. Any mounted filesystem (ext4, NTFS via
   ntfs3/ntfs-3g, FAT, exFAT…) scans fine.
-- **Windows** — `install.ps1`: needs `python` on PATH, runs the self-test,
-  writes a `brenda.cmd` shim. NTFS/FAT/exFAT drives work natively. For ext4
-  disks the installer goes **automagic via WSL2**: if WSL2 is present it
-  clones brenda inside the distro, runs the self-test there, and writes a
-  `brenda-wsl.ps1` — plug in the ext4 drive, run it, it mounts the disk
-  read-write, starts `brenda serve`, and opens the dashboard on Windows
-  (one USB drive = zero questions). If WSL2 is missing you get the one-time
-  `wsl --install --no-launch` line (it needs a reboot, so it asks instead
-  of doing it). DiskInternals Linux Reader is a read-only alternative for
-  scanning through Windows itself.
+- **Windows** — `install.cmd`/`install.ps1`: needs `python` on PATH, runs the
+  self-test, writes a `brenda.cmd` shim. NTFS/FAT/exFAT drives work natively:
+  plug in, `brenda.cmd scan` (auto-detects), or leave `brenda.cmd serve` open —
+  the dropdown shows drives as they appear. **Dual-booter special**: an ext4
+  drive plugged into Windows is invisible to drive letters, but brenda sees
+  the disk and says so — and with WSL2 installed, `brenda.cmd wslmount`
+  (elevated) mounts it read-write into the distro, clones/refreshes brenda
+  there, scans it, and opens the report in the Windows browser. Without WSL2
+  it prints the one-time `wsl --install --no-launch` setup line.
 - **macOS** — clone and run `python3 brenda …`; drives appear from /Volumes
   (APFS/HFS+/FAT/exFAT; NTFS read-only natively). Data home: `~/Library/
   Application Support/brenda`. Notifications via osascript.

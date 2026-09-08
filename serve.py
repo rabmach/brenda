@@ -968,7 +968,12 @@ class Handler(BaseHTTPRequestHandler):
                                    "time")
                     return
                 if not os.path.isdir(mount):
-                    self._redirect("no such mount")
+                    if mount.startswith("\\\\.\\PHYSICALDRIVE"):
+                        self._redirect("that disk holds a Linux filesystem - "
+                                       "Windows cannot read it directly; "
+                                       "run: brenda.cmd wslmount (elevated)")
+                    else:
+                        self._redirect("no such mount")
                     return
                 threading.Thread(target=_bg_with_msg, args=(mount,),
                                  daemon=True).start()

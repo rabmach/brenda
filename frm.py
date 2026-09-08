@@ -1147,6 +1147,33 @@ def list_drives():
     return _list_drives_linux()
 
 
+def _linux_disks_windows():
+    """Physical disks holding Linux filesystems (GPT partition type = Linux
+    fs) that Windows has no driver for — the dual-booter's ext4 backup
+    drive, freshly plugged in and invisible to drive-letter enumeration.
+    Returns [(deviceid, model), ...] via a PowerShell CIM query; [] on any
+    trouble (no PowerShell, no such disks, timeout)."""
+    ps = ("Get-CimInstance Win32_DiskDrive | ForEach-Object {"
+          " $d = $_;"
+          " Get-Partition -DiskNumber $d.DiskNumber -ErrorAction SilentlyContinue"
+          " | ForEach-Object { '{0}|{1}|{2}' -f $d.DeviceID, $d.Model, $_.GptType }"
+          " }")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, timeout=25)
+        out = r.stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return []
+    guid = "0fc63daf-8483-4772-8e79-3d69d8477de4"   # Linux filesystem
+    found = []
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.strip().split("|")]
+        if len(parts) == 3 and guid in parts[2].lower():
+            if all(parts[0] != f[0] for f in found):
+                found.append((parts[0], parts[1] or "disk"))
+    return found
+
+
 def _list_drives_windows():
     out = []
     try:
@@ -1166,6 +1193,11 @@ def _list_drives_windows():
             out.append((letter, letter, fs.value or "?"))
     except Exception:                        # noqa: BLE001 — best effort
         pass
+    # the dual-booter's ext4 drive: present, but unreadable to Windows —
+    # surface it so brenda can explain instead of playing blind
+    for dev, model in _linux_disks_windows():
+        out.append((dev, dev, f"ext4 ({model}) - Windows cannot read it; "
+                              "run: brenda.cmd wslmount"))
     return out
 
 
@@ -1502,6 +1534,12 @@ def main():
         print(f"Auto-detected drive: {root}", file=sys.stderr)
 
     if not os.path.isdir(root):
+        if root.startswith("\\\\.\\PHYSICALDRIVE"):
+            print(f"{root} holds a Linux filesystem (ext4) - Windows has no "
+                  "driver for it, but brenda can reach it through WSL:",
+                  file=sys.stderr)
+            print("  brenda.cmd wslmount", file=sys.stderr)
+            print("(needs WSL2 and an elevated prompt)", file=sys.stderr)
         print(f"Not a directory: {root}", file=sys.stderr)
         return 1
     if not os.access(root, os.R_OK | os.X_OK):

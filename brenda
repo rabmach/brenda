@@ -48,6 +48,8 @@ usage:
   brenda migrate-cache                old groovin path-keyed bpm cache -> md5
   brenda serve                        live dashboard: all scans, compare-to-…,
                                       import/quarantine/merge buttons
+  brenda wslmount                     (Windows) mount an ext4 disk into WSL
+                                      and scan it there
   brenda self-test                    run all built-in checks
   brenda version                      version numbers
 
@@ -122,6 +124,58 @@ def cmd_migrate_cache(argv):
     return 0
 
 
+def cmd_wslmount(argv):
+    """(Windows) mount a Linux-fs disk into WSL and scan it with brenda.
+    The dual-booter's moment: plug the ext4 drive in, run this, get the
+    report in the Windows browser."""
+    import subprocess
+    if not sys.platform.startswith("win"):
+        print("wslmount is a Windows command - on Linux, just plug the "
+              "drive in.")
+        return 0
+    disks = frm._linux_disks_windows()
+    if not disks:
+        print("no Linux-fs disks detected (nothing to mount).")
+        return 0
+    if len(disks) == 1 or not argv:
+        dev, model = disks[0]
+    else:
+        print("several Linux-fs disks:")
+        for i, (d, m) in enumerate(disks, 1):
+            print(f"  {i}: {d}  ({m})")
+        pick = input("pick 1-%d: " % len(disks))
+        dev, model = disks[int(pick) - 1]
+    print(f"mounting {dev} ({model}) into WSL...")
+    r = subprocess.run(["wsl", "--mount", dev])
+    if r.returncode != 0:
+        print("wsl --mount failed - it needs WSL2 and an elevated prompt:")
+        print("  right-click cmd/PowerShell -> Run as administrator, retry")
+        return 1
+    r = subprocess.run(["wsl", "-e", "bash", "-lc",
+                        "ls -1 /mnt/wsl 2>/dev/null | tail -1"],
+                       capture_output=True, text=True)
+    mp = r.stdout.strip()
+    if not mp:
+        print("mounted, but no mountpoint found under /mnt/wsl - check:")
+        print("  wsl -e bash -lc 'ls /mnt/wsl'")
+        return 1
+    guest_mp = "/mnt/wsl/" + mp
+    print(f"mounted at {guest_mp} inside WSL")
+    subprocess.run(["wsl", "-e", "bash", "-lc",
+                    "test -d $HOME/brenda/.git || git clone "
+                    "https://github.com/rabmach/brenda.git $HOME/brenda; "
+                    "cd $HOME/brenda && git pull -ff 2>/dev/null"])
+    print(f"scanning {guest_mp} with brenda inside WSL...")
+    subprocess.run(["wsl", "-e", "bash", "-lc",
+                    f"cd $HOME/brenda && python3 brenda scan '{guest_mp}' "
+                    f"--open"])
+    print("")
+    print("dashboard (WSL-side, then open the URL on Windows):")
+    print("  wsl -e bash -lc 'cd ~/brenda && python3 brenda serve --no-open'")
+    print("unmount when done:  wsl --unmount", dev)
+    return 0
+
+
 def cmd_serve(argv):
     import serve
     return serve.run_cli(argv)
@@ -168,6 +222,8 @@ COMMANDS = {
     "dig": ("genre + BPM playlist from the latest scan", cmd_dig),
     "migrate-cache": ("old groovin bpm cache -> md5-keyed", cmd_migrate_cache),
     "serve": ("live multi-drive dashboard with actions", cmd_serve),
+    "wslmount": ("(Windows) mount a Linux-fs disk into WSL and scan it",
+                 cmd_wslmount),
     "self-test": ("run all built-in checks", cmd_self_test),
     "version": ("print versions", cmd_version),
 }
