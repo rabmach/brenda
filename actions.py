@@ -1727,7 +1727,7 @@ def self_test():
         # Artist there, same grouping either way
         win = sys.platform == "win32"
         artdir = os.path.join(c6, "Artist" if win else "artIst")
-        os.makedirs(artdir)
+        os.makedirs(artdir, exist_ok=True)   # on win32 artdir == Artist
         os.makedirs(os.path.join(c6, "Duo"))
         os.makedirs(os.path.join(c6, "Solo"))
         open(os.path.join(c6, "Artist", "Song.flac"), "wb").write(b"FL" * 500)
