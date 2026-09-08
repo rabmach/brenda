@@ -36,8 +36,10 @@ import shutil
 import sys
 
 import frm
+from grooves import format_rank
 
-VALID_KINDS = ("import", "quarantine", "merge", "dedupe", "delete")
+VALID_KINDS = ("import", "quarantine", "merge", "dedupe", "delete",
+               "variants")
 
 # cover art + playlists complete an artist/album dir and go along for the
 # ride when its music is merged/moved/imported. Everything else (zips, logs,
@@ -99,6 +101,100 @@ def _subtree_junk(base, live):
     return [f for f in live
             if f.startswith(base + os.sep)
             and not _is_audio(f) and not _rides(f)]
+
+
+def _song_key(fp):
+    """Normalized (artist-folder|track) key — frm's filename heuristic,
+    format-blind. None when either half normalizes to nothing (never match
+    on an empty half — too risky)."""
+    a = frm.norm_name(os.path.basename(os.path.dirname(fp)))
+    t = frm.norm_name(os.path.basename(fp))
+    if not a or not t:
+        return None
+    return a + "|" + t
+
+
+def _quality(fp):
+    """(format class, size): lossless beats lossy (grooves.format_rank),
+    then the bigger file. No audio content is read — metadata only."""
+    try:
+        return (format_rank(fp), os.lstat(fp).st_size)
+    except OSError:
+        return (format_rank(fp), 0)
+
+
+def _audio_live(root):
+    return sorted(f for f in _live_files(root) if _is_audio(f))
+
+
+def _group_songs(files, hashes):
+    """Group same-song files: byte-identical content (md5 from the run's
+    hashes.tsv) always groups together, and so does the same normalized
+    song key (artist folder + title, format-blind). Returns deterministic
+    list of groups (lists of paths)."""
+    parent = {f: f for f in files}
+
+    def find(f):
+        while parent[f] != f:
+            parent[f] = parent[parent[f]]
+            f = parent[f]
+        return f
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    by_key, by_md5 = {}, {}
+    for f in files:
+        k = _song_key(f)
+        if k:
+            if k in by_key:
+                union(by_key[k], f)
+            else:
+                by_key[k] = f
+        h = hashes.get(f)
+        if h:
+            if h in by_md5:
+                union(by_md5[h], f)
+            else:
+                by_md5[h] = f
+    groups = {}
+    for f in files:
+        groups.setdefault(find(f), []).append(f)
+    return sorted((sorted(g) for g in groups.values()), key=lambda g: g[0])
+
+
+def _keep_best(files):
+    """The one file to keep from a same-song group: lossless first, then
+    bigger, then path order (deterministic)."""
+    return sorted(files, key=lambda f: (-_quality(f)[0], -_quality(f)[1],
+                                        f))[0]
+
+
+def _dirs_left_empty(root, removed_files):
+    """Dirs under root that hold NOTHING after removed_files are gone
+    (no remaining files, no surviving subdir) — deepest-first list."""
+    remaining = {}
+    for f in _live_files(root):
+        if f in removed_files:
+            continue
+        remaining[os.path.dirname(f)] = remaining.get(os.path.dirname(f), 0) + 1
+    all_dirs = []
+    for base, _ds, _fs in os.walk(root, topdown=False, followlinks=False):
+        if base != root:
+            all_dirs.append(base)
+    alive = {d for d in all_dirs if remaining.get(d)}
+    changed = True
+    while changed:
+        changed = False
+        for d in all_dirs:
+            if d in alive:
+                continue
+            if any(s.startswith(d + os.sep) and s in alive for s in all_dirs):
+                alive.add(d)
+                changed = True
+    return sorted((d for d in all_dirs if d not in alive), reverse=True)
 
 
 # --------------------------------------------------------------------------
@@ -369,6 +465,68 @@ def plan_quarantine(run_dir, collection_path):
     return plan
 
 
+def plan_variants(run_dir, collection_path):
+    """Within ONE collection: group audio by normalized song key (artist
+    folder + title, format-blind) and keep exactly ONE version of each —
+    lossless beats lossy, then the bigger file (grooves.format_rank + size;
+    no audio content is read). Every other version — byte-twins included —
+    moves into quarantine. Each quarantined variant records its keeper file,
+    so purge is an instant isfile() check: a variant may only be purged
+    while the kept version still exists. Cover art, playlists and junk are
+    never touched. Reversible with undo."""
+    report, _hashes = _load_run(run_dir)
+    coll = _assert_collection(report, collection_path)
+    root = report["meta"]["root"]
+    if not os.path.isdir(collection_path):
+        raise ValueError(f"collection directory not found (drive mounted?): "
+                         f"{collection_path}")
+    audio = _audio_live(collection_path)
+    q_root = os.path.join(quarantine_root(), "variants", _new_id() + os.sep)
+    planned = set()
+    ops = []
+    n_songs = 0
+    freed = 0
+    for grp in _group_songs(audio, _hashes):
+        if len(grp) < 2:
+            continue
+        n_songs += 1
+        keeper = _keep_best(grp)
+        for worse in grp:
+            if worse == keeper:
+                continue
+            rel = os.path.relpath(worse, collection_path)
+            dst = _collision_free(os.path.join(q_root, rel), planned=planned)
+            planned.add(dst)
+            try:
+                freed += os.lstat(worse).st_size
+            except OSError:
+                pass
+            ops.append({"op": "move", "src": worse, "dst": dst,
+                        "keeper": keeper,
+                        "why": f"same song, lesser version — kept "
+                               f"{os.path.basename(keeper)}"})
+    moved = {o["src"] for o in ops}
+    dirs = _dirs_left_empty(collection_path, moved)
+    for d in dirs:
+        ops.append({"op": "rmdir", "src": d, "why": "emptied by variants"})
+    if not ops:
+        raise ValueError("no multi-version songs in this collection — every "
+                         "song exists exactly once already")
+    plan = {"id": _new_id(), "kind": "variants", "run": run_dir,
+            "collection": collection_path, "root": root, "ops": ops,
+            "counts": {"songs": n_songs, "quarantined": len(ops) - len(dirs),
+                       "rmdir": len(dirs), "bytes_freed": freed},
+            "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "planned",
+            "notes": ["one copy per song: lossless > opus/ogg > m4a/aac > "
+                      "mp3, then the bigger file; matching is filename-based "
+                      "(artist folder + title, format-blind) — undo if a "
+                      "call is wrong"]}
+    _journal("planned", plan)
+    _save(plan)
+    return plan
+
+
 def plan_delete(run_dir, collection_path):
     """Delete a whole collection directory from the drive — the explicit,
     instant end for a verified-redundant dump (a normal filesystem delete,
@@ -484,11 +642,20 @@ def _find_run_of(collection_path):
 
 
 def plan_merge(run_dir, primary_path, copy_path):
-    """Merge the copy/twin collection into the primary: byte-identical files
-    -> quarantine; unique files -> move into the primary (collision-renamed);
-    emptied directories -> removed. Requires hashes.tsv (content decisions).
-    The primary may live on ANOTHER drive — its run is located by its
-    collection path and its md5s come from that run's hashes.tsv."""
+    """Merge the copy/twin collection into the primary. Decisions, in order:
+      - byte-identical to a primary file -> quarantine (twin)
+      - same SONG as a primary file, different bytes (filename heuristic,
+        format-blind) -> variant: the better version is kept (lossless
+        beats lossy, then bigger); a better incoming file swaps in while
+        the primary's copy moves to quarantine, a worse incoming file is
+        quarantined outright
+      - duplicates of the same song inside the copy collection itself ->
+        keep the best, quarantine the rest
+      - otherwise unique -> move into the primary (collision-renamed)
+    Whole artist/album dirs still move in one piece — but only when the
+    subtree holds no primary variants either. Art/playlists ride along,
+    junk never moves. The primary may live on ANOTHER drive. Requires
+    hashes.tsv. Reversible with undo."""
     report, hashes = _load_run(run_dir)
     c = _assert_collection(report, copy_path)
     root = report["meta"]["root"]
@@ -504,7 +671,8 @@ def plan_merge(run_dir, primary_path, copy_path):
     pr_run_dir = run_dir
     pr_root = root
     if any(d["path"] == primary_path for d in report["dirs"]):
-        primary_files = _file_list(run_dir, primary_path, root)
+        primary_files = [f for f in _file_list(run_dir, primary_path, root)
+                         if os.path.isfile(f)]
         primary_md5 = {hashes[f] for f in primary_files if f in hashes}
     else:
         pr_run_dir = _find_run_of(primary_path)
@@ -513,14 +681,26 @@ def plan_merge(run_dir, primary_path, copy_path):
                              f"{primary_path}")
         pr_report, pr_hashes = _load_run(pr_run_dir)
         pr_root = pr_report["meta"]["root"]
-        primary_files = _file_list(pr_run_dir, primary_path, pr_root)
+        primary_files = [f for f in _file_list(pr_run_dir, primary_path, pr_root)
+                         if os.path.isfile(f)]
         primary_md5 = {pr_hashes[f] for f in primary_files if f in pr_hashes}
 
     for d in (primary_path, copy_path):
         if not os.path.isdir(d):
             raise ValueError(f"directory not found (drive mounted?): {d}")
 
-    copy_files = _file_list(run_dir, copy_path, root)
+    # what songs does the primary hold RIGHT NOW (live — it may have
+    # received files from earlier merges since the scan)
+    primary_by_key = {}
+    for f in _audio_live(primary_path):
+        k = _song_key(f)
+        if k:
+            primary_by_key.setdefault(k, []).append(f)
+
+    # scan lists can be stale (files deleted/renamed since the scan) —
+    # plans are made against the live drive only
+    copy_files = [f for f in _file_list(run_dir, copy_path, root)
+                  if os.path.isfile(f)]
     q_root = os.path.join(quarantine_root(), "merges", _new_id() + os.sep)
     live = _live_files(copy_path)
     live_audio = {f for f in live if _is_audio(f)}
@@ -529,8 +709,18 @@ def plan_merge(run_dir, primary_path, copy_path):
     ride = [f for f in live if _rides(f)]
     junk = [f for f in live if not _is_audio(f) and not _rides(f)]
 
+    def has_primary_variant(base):
+        """True when any song in the subtree exists in the primary as a
+        different-bytes version (whole-dir moves must avoid those)."""
+        for f in live_audio:
+            if f.startswith(base + os.sep) and f not in twins:
+                k = _song_key(f)
+                if k and k in primary_by_key:
+                    return True
+        return False
+
     ops = []
-    n_q = n_m = n_dirs = 0
+    n_q = n_m = n_dirs = n_swap = n_vq = 0
     moved_roots = []                   # artist/album dirs gone wholesale
     planned = set()                    # dsts assigned by THIS plan — other
                                        # ops must not collide with them
@@ -548,6 +738,7 @@ def plan_merge(run_dir, primary_path, copy_path):
         audio_a = [f for f in live_audio if f.startswith(adir + os.sep)]
         junk_a = _subtree_junk(adir, live)
         if audio_a and not any(f in twins for f in audio_a) and not junk_a \
+                and not has_primary_variant(adir) \
                 and not os.path.exists(os.path.join(primary_path, a)) \
                 and os.path.join(primary_path, a) not in planned:
             ops.append({"op": "move_dir", "src": adir,
@@ -564,6 +755,7 @@ def plan_merge(run_dir, primary_path, copy_path):
             audio_al = [f for f in live_audio if f.startswith(aldir + os.sep)]
             junk_al = _subtree_junk(aldir, live)
             if audio_al and not any(f in twins for f in audio_al) and not junk_al \
+                    and not has_primary_variant(aldir) \
                     and not os.path.exists(os.path.join(primary_path, a, alb)) \
                     and os.path.join(primary_path, a, alb) not in planned:
                 ops.append({"op": "move_dir", "src": aldir,
@@ -574,25 +766,90 @@ def plan_merge(run_dir, primary_path, copy_path):
                 n_m += len(audio_al)
                 n_dirs += 1
 
-    # file-level: audio left over (twins quarantined, uniques merged in)
-    for src in copy_files + extra_audio:
-        if in_moved(src):
-            continue
+    # file-level: group the incoming audio by song (md5 + song-key union),
+    # then decide per group (byte-twins -> quarantine; variants -> best
+    # wins; unique -> in)
+    incoming = [f for f in copy_files + extra_audio if not in_moved(f)]
+
+    def twin_of_primary(src):
         h = hashes.get(src)
-        rel = os.path.relpath(src, copy_path)
-        if h and h in primary_md5:
+        return bool(h and h in primary_md5)
+
+    for grp in _group_songs(incoming, hashes):
+        # byte-twins go straight to quarantine, unaffected by variant logic
+        grp_twins = [f for f in grp if twin_of_primary(f)]
+        rest = [f for f in grp if f not in grp_twins]
+        for src in grp_twins:
+            rel = os.path.relpath(src, copy_path)
             dst = os.path.join(q_root, rel)
             ops.append({"op": "move", "src": src, "dst": dst,
                         "why": "byte-identical copy exists in primary"})
             planned.add(dst)
             n_q += 1
+        if not rest:
+            continue
+        best_src = _keep_best(rest) if len(rest) > 1 else rest[0]
+        k = _song_key(best_src)
+        # best of the group vs the primary's version of the same song
+        keeper_dst = None
+        if k and k in primary_by_key:
+            p_best = _keep_best(primary_by_key[k])
+            if _quality(best_src) > _quality(p_best):
+                rel = os.path.relpath(best_src, copy_path)
+                dst = _collision_free(os.path.join(primary_path, rel),
+                                      planned=planned)
+                ops.append({"op": "move", "src": best_src, "dst": dst,
+                            "why": f"better version of a song the primary "
+                                   f"has ({os.path.basename(p_best)})"})
+                planned.add(dst)
+                keeper_dst = dst
+                n_m += 1
+                n_swap += 1
+                qdst = _collision_free(os.path.join(q_root, "replaced",
+                                                    os.path.basename(p_best)),
+                                       planned=planned)
+                ops.append({"op": "move", "src": p_best, "dst": qdst,
+                            "keeper": dst,
+                            "if_src": best_src, "if_dst": dst,
+                            "why": "replaced by a better version of the "
+                                   "same song"})
+                planned.add(qdst)
+                n_q += 1
+            else:
+                qdst = _collision_free(os.path.join(q_root, "variants",
+                                                    os.path.basename(best_src)),
+                                       planned=planned)
+                ops.append({"op": "move", "src": best_src, "dst": qdst,
+                            "keeper": p_best,
+                            "why": f"worse variant — the primary already "
+                                   f"has this song ({os.path.basename(p_best)})"})
+                planned.add(qdst)
+                n_q += 1
+                n_vq += 1
+                keeper_dst = p_best
         else:
+            rel = os.path.relpath(best_src, copy_path)
             dst = _collision_free(os.path.join(primary_path, rel),
                                   planned=planned)
-            ops.append({"op": "move", "src": src, "dst": dst,
+            ops.append({"op": "move", "src": best_src, "dst": dst,
                         "why": "unique to this collection"})
             planned.add(dst)
+            keeper_dst = dst
             n_m += 1
+        # the group's lesser versions never reach the primary
+        for worse in rest:
+            if worse == best_src:
+                continue
+            rel = os.path.relpath(worse, copy_path)
+            qdst = _collision_free(os.path.join(q_root, "variants", rel),
+                                   planned=planned)
+            ops.append({"op": "move", "src": worse, "dst": qdst,
+                        "keeper": keeper_dst,
+                        "why": "duplicate version of a song in this "
+                               "collection itself"})
+            planned.add(qdst)
+            n_q += 1
+            n_vq += 1
 
     # cover art + playlists go along (junk never does)
     for src in ride:
@@ -641,6 +898,10 @@ def plan_merge(run_dir, primary_path, copy_path):
         ops.append({"op": "rmdir", "src": copy_path, "why": "emptied by merge"})
     notes = [f"primary lives in another run: {pr_run_dir}"] \
         if pr_run_dir != run_dir else []
+    if n_swap or n_vq:
+        notes.append("variant matching is filename-based (artist folder + "
+                     "title, format-blind): better versions replaced worse "
+                     "ones — undo if a call is wrong")
     if junk:
         notes.append(f"{len(junk)} junk file(s) (zips etc.) stay put — "
                      "brenda never moves or deletes those; their dirs "
@@ -650,7 +911,10 @@ def plan_merge(run_dir, primary_path, copy_path):
             "primary_root": pr_root, "root": root,
             "ops": ops,
             "counts": {"quarantined": n_q, "merged": n_m,
-                       "whole_dirs": n_dirs, "rmdir": len(dirs) + (0 if copy_path in alive else 1)},
+                       "variants_kept": n_swap,
+                       "variants_quarantined": n_vq,
+                       "whole_dirs": n_dirs,
+                       "rmdir": len(dirs) + (0 if copy_path in alive else 1)},
             "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "status": "planned", "notes": notes}
     _check_sources_exist(plan)
@@ -745,6 +1009,14 @@ def apply_plan(plan):
                     raise FileExistsError(f"refusing to overwrite: {dst}")
                 shutil.copy2(src, dst, follow_symlinks=False)
             elif kind == "move":
+                # paired swap: proceed only if the replacement still exists
+                # at either end of its own move (it may not have landed —
+                # drive changed since the plan — then keep the replaced file)
+                if op.get("if_src") or op.get("if_dst"):
+                    if not any(os.path.isfile(p) for p in
+                               (op.get("if_src"), op.get("if_dst")) if p):
+                        skipped += 1
+                        continue
                 if not os.path.exists(src):
                     skipped += 1
                     continue
@@ -961,6 +1233,15 @@ def _purge_problems(plan, hashes):
         if not _within(os.path.realpath(dst), q_root):
             continue
         if op["op"] == "move":
+            keeper = op.get("keeper")
+            if keeper:
+                # variant ops carry their keeper: the purge is instant and
+                # allowed only while the kept version still exists
+                if os.path.isfile(keeper):
+                    continue
+                problems.append(f"{op['src']}: the kept version is gone "
+                                f"({keeper}) — purge refused")
+                continue
             files = [(dst, op["src"])]
         else:
             files = []
@@ -1142,6 +1423,8 @@ def self_test():
         check("merge plan: 1 quarantined + 4 merged + 1 whole dir, no rmdir "
               "(junk zip keeps its dir alive)",
               plan["counts"] == {"quarantined": 1, "merged": 4,
+                                 "variants_kept": 0,
+                                 "variants_quarantined": 0,
                                  "whole_dirs": 1, "rmdir": 0})
         check("plan is dry (b untouched)",
               os.path.isfile(os.path.join(b, "Alpha", "01 - One.mp3")))
@@ -1302,7 +1585,7 @@ def self_test():
         c5 = os.path.join(drive, "twofive", "Music")
         os.makedirs(os.path.join(c5, "Unknown"))
         os.makedirs(os.path.join(a, "Unknown"))
-        open(os.path.join(c5, "Unknown", "Song.mp3"), "wb").write(b"V1")
+        open(os.path.join(c5, "Unknown", "Song.mp3"), "wb").write(b"V1" * 50)
         open(os.path.join(c5, "Unknown", "Song (merged 1).mp3"),
              "wb").write(b"V1-OLD-MERGED")
         open(os.path.join(c5, "Unknown", "Third.mp3"), "wb").write(b"T3")
@@ -1314,16 +1597,17 @@ def self_test():
         plan8 = plan_merge(rundir5, a, c5)
         dsts = sorted(o["dst"] for o in plan8["ops"]
                       if o["op"] == "move"
-                      and "Song" in os.path.basename(o["dst"]))
+                      and "Song" in os.path.basename(o["dst"])
+                      and o["dst"].startswith(a))
         check("same-name sources get DISTINCT planned destinations",
               len(dsts) == 2 and len(set(dsts)) == 2)
         apply_plan(plan8)
         landed = set(os.listdir(os.path.join(a, "Unknown")))
-        check("all three variants landed, none lost",
-              landed == {"Song.mp3", "Song (merged 1).mp3",
-                         "Song (merged 2).mp3", "Third.mp3"})
+        check("variant swap + rename collision: nothing lost, distinct slots",
+              landed == {"Song (merged 1).mp3", "Song (merged 2).mp3",
+                         "Third.mp3"})
         undo(plan8["id"])
-        check("undo follows the renamed destinations",
+        check("undo follows the swapped/renamed destinations",
               os.path.isfile(os.path.join(c5, "Unknown", "Song.mp3"))
               and os.path.isfile(os.path.join(c5, "Unknown",
                                               "Song (merged 1).mp3"))
@@ -1343,6 +1627,112 @@ def self_test():
         sneak_ok = os.path.isfile(sneak_path) \
             and open(sneak_path, "rb").read() == b"SNEAK"
         check("undo does not touch the pre-existing sneaky file", sneak_ok)
+
+        # --- variants: keep best per song (one copy per song) ---------------
+        c6 = os.path.join(drive, "sixsix", "Music")
+        os.makedirs(os.path.join(c6, "Artist"))
+        os.makedirs(os.path.join(c6, "artIst"))          # spelling variant
+        os.makedirs(os.path.join(c6, "Duo"))
+        os.makedirs(os.path.join(c6, "Solo"))
+        open(os.path.join(c6, "Artist", "Song.flac"), "wb").write(b"FL" * 500)
+        open(os.path.join(c6, "Artist", "Song.mp3"), "wb").write(b"MP3")
+        open(os.path.join(c6, "artIst", "Song.ogg"), "wb").write(b"OGG")
+        open(os.path.join(c6, "Duo", "Twin.mp3"), "wb").write(b"TT")
+        open(os.path.join(c6, "Duo", "Twin (1).mp3"), "wb").write(b"TT")
+        open(os.path.join(c6, "Solo", "Only.mp3"), "wb").write(b"ONLY")
+        open(os.path.join(c6, "Artist", "cover.jpg"), "wb").write(b"ART6")
+        data = frm.analyze(drive, cfg)
+        rundir6 = os.path.join(tmp, "run6")
+        os.makedirs(rundir6)
+        frm.export_run(data, drive, rundir6)
+        planV = plan_variants(rundir6, c6)
+        check("variants: 2 multi-version songs found",
+              planV["counts"]["songs"] == 2)
+        check("variants: 3 lesser versions quarantined "
+              "(flac kept; twin pair collapsed)",
+              planV["counts"]["quarantined"] == 3)
+        check("variants: keeper recorded on every op",
+              all(o.get("keeper") for o in planV["ops"]
+                  if o["op"] == "move"))
+        apply_plan(planV)
+        check("variants applied: flac kept, art untouched, solo untouched",
+              os.path.isfile(os.path.join(c6, "Artist", "Song.flac"))
+              and os.path.isfile(os.path.join(c6, "Artist", "cover.jpg"))
+              and os.path.isfile(os.path.join(c6, "Solo", "Only.mp3")))
+        twins_left = [f for f in os.listdir(os.path.join(c6, "Duo"))
+                      if f.endswith(".mp3")]
+        check("variants applied: one twin survives, lesser versions gone",
+              not os.path.exists(os.path.join(c6, "Artist", "Song.mp3"))
+              and not os.path.exists(os.path.join(c6, "artIst"))
+              and twins_left == ["Twin (1).mp3"])
+        pv = purge(planV["id"])               # keepers exist -> allowed
+        check("variants purge: verified-by-keeper deletion worked",
+              pv["result"].get("purged_files") == 3)
+
+        # keeper gone -> purge refuses, and undo still works
+        c8 = os.path.join(drive, "eight", "Music")
+        os.makedirs(os.path.join(c8, "Duo"))
+        open(os.path.join(c8, "Duo", "Hit.flac"), "wb").write(b"FL8" * 400)
+        open(os.path.join(c8, "Duo", "Hit.mp3"), "wb").write(b"M8")
+        open(os.path.join(c8, "Duo", "Extra8.mp3"), "wb").write(b"E8")
+        data = frm.analyze(drive, cfg)
+        rundir8 = os.path.join(tmp, "run8")
+        os.makedirs(rundir8)
+        frm.export_run(data, drive, rundir8)
+        planV2 = plan_variants(rundir8, c8)
+        apply_plan(planV2)
+        keeper_path = planV2["ops"][0]["keeper"]
+        os.remove(keeper_path)                # keeper vanishes -> refuse
+        refused = False
+        try:
+            purge(planV2["id"])
+        except ValueError:
+            refused = True
+        check("variants purge refused when the keeper is gone", refused)
+        undo(planV2["id"])
+        check("variants undo still restores after a refused purge",
+              os.path.isfile(os.path.join(c8, "Duo", "Hit.mp3")))
+
+        # --- variant-aware merge: better swaps in, worse quarantines --------
+        c7 = os.path.join(drive, "seven", "Music")
+        os.makedirs(os.path.join(c7, "Alpha"))
+        open(os.path.join(c7, "Alpha", "Voice.flac"), "wb").write(b"FLAC" * 400)
+        open(os.path.join(c7, "Alpha", "Voice.ogg"), "wb").write(b"OGGV")
+        open(os.path.join(c7, "Alpha", "Extra7.mp3"), "wb").write(b"EXTRA7")
+        open(os.path.join(a, "Alpha", "Voice.mp3"), "wb").write(b"PRIV")
+        data = frm.analyze(drive, cfg)
+        rundir7 = os.path.join(tmp, "run7")
+        os.makedirs(rundir7)
+        frm.export_run(data, drive, rundir7)
+        plan10 = plan_merge(rundir7, a, c7)
+        check("merge variants: 1 swapped in, 1 lesser quarantined",
+              plan10["counts"]["variants_kept"] == 1
+              and plan10["counts"]["variants_quarantined"] == 1)
+        apply_plan(plan10)
+        check("merge applied: flac won the slot in the primary",
+              os.path.isfile(os.path.join(a, "Alpha", "Voice.flac")))
+        check("merge applied: primary's mp3 parked in quarantine",
+              any("Voice.mp3" in f for _r, _d, fs in
+                  os.walk(quarantine_root()) for f in fs))
+        check("merge applied: incoming ogg never reached the primary",
+              not os.path.exists(os.path.join(a, "Alpha", "Voice.ogg")))
+        undo(plan10["id"])
+        check("merge undo: mp3 back in primary, flac back in copy",
+              os.path.isfile(os.path.join(a, "Alpha", "Voice.mp3"))
+              and os.path.isfile(os.path.join(c7, "Alpha", "Voice.flac")))
+        # incoming loses: same format, smaller file -> primary untouched
+        os.remove(os.path.join(c7, "Alpha", "Voice.flac"))
+        os.remove(os.path.join(c7, "Alpha", "Voice.ogg"))
+        open(os.path.join(c7, "Alpha", "Voice.mp3"), "wb").write(b"V")
+        plan11 = plan_merge(rundir7, a, c7)
+        check("merge variants: incoming loses, primary keeps its file",
+              plan11["counts"]["variants_kept"] == 0
+              and plan11["counts"]["variants_quarantined"] == 1)
+        apply_plan(plan11)
+        check("merge applied: primary's bigger mp3 untouched",
+              open(os.path.join(a, "Alpha", "Voice.mp3"), "rb").read()
+              == b"PRIV")
+        undo(plan11["id"])
 
         check("actions.log exists and has entries",
               os.path.isfile(log_path())

@@ -410,6 +410,10 @@ def _action_forms(run, c, new_n, coll_pairs):
   <input type="hidden" name="run" value="{frm.esc(rid)}">
   <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
   <button {disabled}class="warn" type="submit">quarantine &rarr; local review folder</button></form></span>
+ <span class="act"><form method="post" action="/{t}/plan/variants" onsubmit="return confirm('Plan variant cleanup of THIS collection? One copy per song: lossless beats lossy, then the bigger file. Extra versions move to quarantine — undoable, and purge only works while the kept version exists.')">
+  <input type="hidden" name="run" value="{frm.esc(rid)}">
+  <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
+  <button {disabled}type="submit">variants: keep best per song</button></form></span>
  <span class="act"><form method="post" action="/{t}/plan/delete" onsubmit="return confirm('Plan DELETE of {short}? brenda first verifies every music file here still exists elsewhere; non-music files (art/playlists/zips) go too. PERMANENT — no undo.')">
   <input type="hidden" name="run" value="{frm.esc(rid)}">
   <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
@@ -494,15 +498,27 @@ def _describe_plan(plan, plain=False):
         pr_root = plan.get("primary_root", root)
         primary_short = frm.loc(plan.get("primary", ""), pr_root) \
             if plan.get("primary") else "?"
+        swap = counts.get("variants_kept", 0)
+        vq = counts.get("variants_quarantined", 0)
+        var_txt = ""
+        if swap or vq:
+            var_txt = (f"; variants: {swap} better version(s) swapped in, "
+                       f"{vq} lesser quarantined")
         return (f"{B('merge')} — move the music of {C(coll_short)} into "
                 f"{C(primary_short)}: byte-identical files → quarantine, "
-                "unique files → moved in, the emptied dir removed")
+                f"unique files → moved in{var_txt}, the emptied dir removed")
     if kind == "delete":
         return (f"{B('delete')} — permanently remove {C(coll_short)} from "
                 f"the drive ({counts.get('audio_files', 0):,} music + "
                 f"{counts.get('non_music', 0):,} non-music file(s) — every "
                 "music file was verified to exist elsewhere first; "
                 "no undo)")
+    if kind == "variants":
+        return (f"{B('variants cleanup')} — keep the best version of each "
+                f"song in {C(coll_short)} ({counts.get('songs', 0):,} "
+                f"song(s) had 2+ versions; lossless beats lossy, then "
+                f"bigger) — {counts.get('quarantined', 0):,} extra "
+                "version(s) → quarantine")
     if kind == "dedupe":
         drive = os.path.basename(root.rstrip(os.sep)) or "drive"
         return (f"{B('dedupe')} — in the {C(drive)} scan: keep the first "
@@ -996,6 +1012,11 @@ class Handler(BaseHTTPRequestHandler):
                 plan = actions.plan_dedupe(
                     os.path.join(dh, "runs", form["run"]))
                 self._send(confirm_page(plan))
+            elif route == "plan/variants":
+                plan = actions.plan_variants(
+                    os.path.join(dh, "runs", form["run"]),
+                    form["collection"])
+                self._send(confirm_page(plan))
             elif route == "plan/delete":
                 plan = actions.plan_delete(
                     os.path.join(dh, "runs", form["run"]),
@@ -1029,6 +1050,7 @@ class Handler(BaseHTTPRequestHandler):
                         "quarantine": "APPLIED QUARANTINE",
                         "dedupe": "APPLIED DEDUPE",
                         "import": "APPLIED IMPORT",
+                        "variants": "APPLIED VARIANT CLEANUP",
                         "delete": "APPLIED DELETE — PERMANENT"}.get(
                     plan["kind"], "APPLIED")
                 perm = ""
