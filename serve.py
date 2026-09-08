@@ -675,6 +675,11 @@ def _actions_section():
                 btns = (f"<form method='post' action='undo'>"
                         f"<input type='hidden' name='id' value='{a['id']}'>"
                         f"<button type='submit'>undo — put it all back</button></form>")
+            if a["kind"] == "import":
+                btns += (f" <form method='post' action='close'>"
+                         f"<input type='hidden' name='id' value='{a['id']}'>"
+                         f"<button type='submit' title='the moves are final - drops the undo button from the ledger (the journal keeps the record)'>"
+                         f"done — keep it</button></form>")
             if a["kind"] in ("quarantine", "merge", "dedupe", "variants"):
                 tgt = frm.esc(_purge_label(a))
                 btns += (f" <form method='post' action='purge' "
@@ -689,6 +694,9 @@ def _actions_section():
         elif st == "applying":
             badge = ('<span class="mnt badge-ok">applying now — progress on '
                      'the banner</span>')
+            btns = ""
+        elif st == "closed":
+            badge = '<span class="mnt badge-ok">done — closed</span>'
             btns = ""
         elif st == "undone":
             badge = '<span class="mnt badge-ok">undone</span>'
@@ -1196,6 +1204,11 @@ class Handler(BaseHTTPRequestHandler):
                 _notify(f"you just did THIS: CANCELLED — {_describe_plan(plan, plain=True)}.\n"
                         "The plan was discarded; nothing had moved.",
                         title="brenda — CANCELLED")
+            elif route == "close":
+                plan = actions.close(form["id"])
+                self._redirect(f"<b>Closed:</b> {_describe_plan(plan)} — "
+                               "the moves are final; the ledger entry is "
+                               "filed as done")
             elif route == "purge":
                 plan = actions.purge(form["id"])
                 n = plan["result"].get("purged_files", 0)

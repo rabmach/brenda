@@ -456,6 +456,22 @@ def plan_import(run_dir, collection_path, target, move=False):
         planned.add(dst)
         n_tracks += 1
 
+    # move-mode hygiene: dirs the move empties get removed (junk keeps its
+    # dir alive, by design); copy-mode never touches the source tree
+    if move:
+        moved = {o["src"] for o in ops
+                 if o["op"] in ("move", "move_dir")}
+
+        def in_moved_dir(f):
+            return any(f == r or f.startswith(r + os.sep)
+                       for r in moved_roots)
+
+        for d in _dirs_left_empty(collection_path, moved):
+            if in_moved_dir(d):
+                continue                  # whole-dir moves take theirs away
+            ops.append({"op": "rmdir", "src": d,
+                        "why": "emptied by move-import"})
+
     junk_n = len([f for f in live if not _is_audio(f) and not _rides(f)])
     plan = {"id": _new_id(), "kind": "import", "run": run_dir,
             "collection": collection_path, "target": target,
@@ -1271,6 +1287,24 @@ def discard(action_id):
     return plan
 
 
+def close(action_id):
+    """Finalize an applied import: the user is happy, the moves stand as
+    they are. Drops the undo button - after close there is no way back
+    (the journal keeps the record). No data changes."""
+    plan = load_plan(action_id)
+    if plan["status"] != "applied":
+        raise ValueError(f"action {action_id} is {plan['status']} — only "
+                         "applied actions can be closed")
+    if plan["kind"] != "import":
+        raise ValueError("close is for import actions - quarantine/merge/"
+                         "dedupe actions have undo and purge instead")
+    plan["status"] = "closed"
+    plan["closed"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _journal("closed", plan)
+    _save(plan)
+    return plan
+
+
 def undo(action_id):
     """Reverse an applied action using its manifest (reverse op order)."""
     plan = load_plan(action_id)
@@ -1714,6 +1748,52 @@ def self_test():
               "correctly remains, empty)",
               os.path.isdir(target2)
               and not os.path.exists(os.path.join(target2, "Zulu")))
+
+        # --- move-mode import: emptied dirs get removed ---------------------
+        target5 = os.path.join(tmp, "local5")
+        plan7 = plan_import(rundir3, c3, target5, move=True)
+        apply_plan(plan7)
+        check("move-import: music gone from the source collection",
+              not os.path.exists(os.path.join(c3, "Zulu")))
+        check("move-import: no files left behind in the source tree",
+              sum(len(fs) for _b, _d, fs in os.walk(c3)) == 0)
+        refused = False
+        try:
+            undo(plan7["id"])
+        except ValueError:
+            refused = True
+        check("move-import: undo still works before close", not refused)
+        undo(plan7["id"])                   # c3 restored for later tests
+
+        # --- close: zero out an applied import (moves final, no undo) ------
+        c8b = os.path.join(drive, "eightb", "Music")
+        os.makedirs(os.path.join(c8b, "Duo"))
+        open(os.path.join(c8b, "Duo", "Hit2.flac"), "wb").write(b"F2" * 300)
+        open(os.path.join(c8b, "Duo", "Hit2.mp3"), "wb").write(b"M2")
+        open(os.path.join(c8b, "Duo", "X2.mp3"), "wb").write(b"Y2")
+        data = frm.analyze(drive, cfg)
+        rundir8b = os.path.join(tmp, "run8b")
+        os.makedirs(rundir8b)
+        frm.export_run(data, drive, rundir8b)
+        with open(os.path.join(rundir8b, "compare.json"), "w") as f:
+            json.dump({"per_collection": [{"path": c8b, "new": [
+                os.path.join(c8b, "Duo", "Hit2.flac"),
+                os.path.join(c8b, "Duo", "Hit2.mp3"),
+                os.path.join(c8b, "Duo", "X2.mp3")], "new_files": 3}]}, f)
+        target6 = os.path.join(tmp, "local6")
+        plan8 = plan_import(rundir8b, c8b, target6, move=True)
+        apply_plan(plan8)
+        check("move-import on fresh tree: source emptied",
+              sum(len(fs) for _b, _d, fs in os.walk(c8b)) == 0)
+        plan8 = close(plan8["id"])
+        check("close: applied import filed as done",
+              plan8["status"] == "closed")
+        refused = False
+        try:
+            undo(plan8["id"])
+        except ValueError:
+            refused = True
+        check("close: no undo after closing (the moves stand)", refused)
 
         plan5 = plan_quarantine(rundir3, c3)
         apply_plan(plan5)
