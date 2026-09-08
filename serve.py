@@ -414,6 +414,12 @@ def _action_forms(run, c, new_n, coll_pairs):
   {copy_btn}
   <label class="mini"><input type="checkbox" name="move" value="1"> move instead</label>
   <small class="dim">&rarr; {tgt}</small></form></div>
+ <div class="act"><form method="post" action="/{t}/collcompare" onsubmit="return confirm('Collection-only compare: fast — uses scan-time hashes and the cached index, and updates just this card.')">
+  <small class="dim">this collection vs:</small>
+  <input type="hidden" name="run" value="{frm.esc(rid)}">
+  <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
+  <select name="against"><option value="home">the local home dir</option><option value="">everything indexed</option></select>
+  <button type="submit">compare</button></form></div>
  <div class="act"><form method="post" action="/{t}/plan/merge" onsubmit="return confirm('Plan merge of THIS collection into the collection picked in the dropdown? Byte-identical files go to quarantine, unique files + cover art + playlists move into the primary. Junk (zips) never moves. Nothing moves yet — next you get a confirm page with an apply button.')">
   <small class="dim">merge <code>{short}</code> into:</small>
   <input type="hidden" name="copy_run" value="{frm.esc(rid)}">
@@ -428,13 +434,28 @@ def _action_forms(run, c, new_n, coll_pairs):
   <button {disabled}class="warn" type="submit">delete: {short} — verified</button></form></div>"""
 
 
-def _collection_block(run, c, coll_pairs, show_nums=True, events=None):
+def _collection_block(run, c, coll_pairs, show_nums=True, events=None,
+                      overlay=None):
     """One collection: a proper two-row table (header row + values row) so
     the compare numbers render as a real table instead of an inline soup,
     plus the action pills and event lines announcing what already happened
-    to this collection."""
+    to this collection. A per-collection overlay (coll-compare.json) wins
+    over the run-wide numbers for this card, with a line explaining it."""
     nums = _coll_compare(run, c["path"])
     new_n = nums[2] if nums else 0
+    overlay_line = ""
+    if overlay and overlay.get("collection") == c["path"]:
+        entry = (overlay.get("per_collection") or [{}])[0]
+        nums = (entry.get("exact_files", 0), entry.get("variant_files", 0),
+                entry.get("new_files", 0))
+        new_n = nums[2]
+        roots = ", ".join("~" if os.path.expanduser("~") == rr else rr
+                          for rr in overlay.get("meta", {})
+                          .get("index_roots", []))
+        overlay_line = (f'<div class="evline">numbers = collection-only '
+                        f'compare vs <b>{frm.esc(roots or "nothing")}</b> at '
+                        f'{frm.esc(overlay.get("time", "?"))} — the run-wide '
+                        'numbers may differ</div>')
     head = ('<table class="coll"><tr>'
             "<th>collection</th><th>what it is</th>"
             "<th class='num'>audio</th><th class='num'>size</th>"
@@ -470,7 +491,7 @@ def _collection_block(run, c, coll_pairs, show_nums=True, events=None):
                     'Re-scan the drive to refresh the listing.</div>')
     for line in (events or {}).get(c["path"], []):
         ev_html += f'<div class="evline">{frm.esc(line)}</div>'
-    return ('<div class="collbox">' + head + ev_html
+    return ('<div class="collbox">' + head + overlay_line + ev_html
             + f'<div class="acts">{_action_forms(run, c, new_n, coll_pairs)}</div>'
             + '</div>')
 
@@ -771,8 +792,17 @@ def dashboard(msg=""):
 <input type="hidden" name="run" value="{frm.esc(rid)}">
 <select name="against">{''.join(against_opts)}</select>
 <button class="go" type="submit">compare to …</button></p></form>""")
+        ov = None
+        ovpath = os.path.join(r["dir"], "coll-compare.json")
+        if os.path.isfile(ovpath):
+            try:
+                with open(ovpath, encoding="utf-8") as f:
+                    ov = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                ov = None
         for c in _collections(r):
-            parts.append(_collection_block(r, c, coll_pairs, events=events))
+            parts.append(_collection_block(r, c, coll_pairs, events=events,
+                                           overlay=ov))
         inner = _report_inner(r["dir"])
         if inner:
             open_tag = " open" if not first_report_shown else ""
@@ -1022,6 +1052,20 @@ class Handler(BaseHTTPRequestHandler):
                                  args=(run_dir, against),
                                  daemon=True).start()
                 self._redirect(f"comparing {form['run']} — refresh is coming")
+            elif route == "collcompare":
+                if STATE.status.get("stage"):
+                    self._redirect("a background job is already running "
+                                   "(see the banner at the top) — one at a "
+                                   "time")
+                    return
+                run_dir = os.path.join(dh, "runs", form["run"])
+                coll = form["collection"]
+                threading.Thread(target=_bg_coll_compare,
+                                 args=(run_dir, coll,
+                                       form.get("against") or None),
+                                 daemon=True).start()
+                self._redirect(f"collection-only compare of {coll} — watch "
+                               "the banner; the card updates when it lands")
             elif route == "plan/import":
                 plan = actions.plan_import(
                     os.path.join(dh, "runs", form["run"]),
@@ -1135,6 +1179,55 @@ class Handler(BaseHTTPRequestHandler):
             STATE.status["fail"] = str(e)
             print(f"serve: FAILED {route}: {e}", file=sys.stderr)
             self._redirect(f"FAILED: {e}")
+
+def _ensure_coll_compare(run_dir, collection, against=None):
+    """Per-collection compare: fast — the drive side uses scan-time hashes,
+    the local side the cached index. Writes a per-collection overlay
+    (coll-compare.json) so one card's numbers can be collection-specific
+    without re-running the whole drive compare."""
+    import compare
+    import datetime
+    idx_file = compare.index_path()
+    idx = compare._load_index(idx_file)
+    roots = [os.path.expanduser("~")]
+    if against != "home":
+        for r in idx["roots"]:
+            if r not in roots and os.path.isdir(r):
+                roots.append(r)
+    run = compare.load_run(run_dir)
+    index, _stats = compare.build_index(roots, idx_file, 4, quiet=True)
+    # only_roots scopes the diff to the roots built for THIS compare —
+    # otherwise stale sections in the index (old drives) sneak back in
+    results = compare.compare_run(run, index, only_roots=roots,
+                                  collection=collection)
+    t = results["totals"]
+    overlay = {"collection": collection,
+               "meta": {"index_roots": sorted(results.get("against", []))},
+               "per_collection": results["per_collection"],
+               "totals": t,
+               "time": datetime.datetime.now().strftime("%H:%M:%S")}
+    with open(os.path.join(run_dir, "coll-compare.json"), "w",
+              encoding="utf-8") as f:
+        json.dump(overlay, f, indent=1)
+    pretty = ", ".join("~" if os.path.expanduser("~") == rr else rr
+                       for rr in overlay["meta"]["index_roots"]) or "nothing"
+    return (f"collection-only compare vs {pretty}: {t['run_files']:,} files "
+            f"-> {t['exact_files']:,} have / {t['variant_files']:,} variant "
+            f"/ {t['new_files']:,} new")
+
+
+def _bg_coll_compare(run_dir, collection, against):
+    try:
+        STATE.job_start("compare", f"collection-only compare of {collection}")
+        msg = _ensure_coll_compare(run_dir, collection, against)
+        STATE.job_end(msg)
+        STATE.status["fail"] = None
+        print(f"serve: {msg}", file=sys.stderr)
+    except Exception as e:                           # noqa: BLE001
+        STATE.job_end(f"collection compare FAILED: {e}")
+        STATE.status["fail"] = f"collection compare FAILED: {e}"
+        print(f"serve: collection compare FAILED: {e}", file=sys.stderr)
+
 
 def _bg_with_msg(mount):
     try:

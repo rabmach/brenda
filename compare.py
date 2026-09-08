@@ -225,10 +225,12 @@ def load_run(rundir):
 # the diff
 # --------------------------------------------------------------------------
 
-def compare_run(run, index, only_roots=None):
+def compare_run(run, index, only_roots=None, collection=None):
     """Diff the run against index sections. only_roots restricts the diff to
     those roots (scan-to-scan compares); None = every indexed root except
-    the run's own. Returns results with 'against' = the roots actually used."""
+    the run's own. collection restricts the run side to a single collection
+    path (per-collection compares — fast, uses scan-time hashes). Returns
+    results with 'against' = the roots actually used."""
     run_root = os.path.realpath(run["root"])
     only = ({os.path.realpath(r) for r in only_roots}
             if only_roots else None)
@@ -254,6 +256,8 @@ def compare_run(run, index, only_roots=None):
               "new_files": 0, "new_bytes": 0, "run_files": 0}
     new_master = []
     for coll in run["collections"]:
+        if collection and coll["path"] != collection:
+            continue
         entry = {"path": coll["path"], "short": coll["short"],
                  "kind": coll["kind"], "run_files": 0,
                  "exact_files": 0, "exact_bytes": 0,
