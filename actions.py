@@ -114,13 +114,52 @@ def _song_key(fp):
     return a + "|" + t
 
 
-def _quality(fp):
-    """(format class, size): lossless beats lossy (grooves.format_rank),
-    then the bigger file. No audio content is read — metadata only."""
+_PROPS_CACHE = {}
+
+
+def _read_props(fp):
+    """(tag richness, bitrate) via mutagen — headers only, no audio decode.
+    Cached per (path, size, mtime). (0, 0) when unreadable or mutagen is
+    absent; ranking then falls back to format + size."""
     try:
-        return (format_rank(fp), os.lstat(fp).st_size)
+        st = os.lstat(fp)
+        key = (fp, st.st_size, st.st_mtime)
     except OSError:
-        return (format_rank(fp), 0)
+        return 0, 0
+    if key in _PROPS_CACHE:
+        return _PROPS_CACHE[key]
+    tag_score = 0
+    bitrate = 0
+    try:
+        import mutagen
+        m = mutagen.File(fp, easy=True)
+        if m is not None:
+            if m.tags:
+                for vals in m.tags.values():
+                    if isinstance(vals, list) and any(str(v).strip()
+                                                      for v in vals):
+                        tag_score += 1
+            info = getattr(m, "info", None)
+            bitrate = int(getattr(info, "bitrate", 0) or 0)
+    except Exception:                        # noqa: BLE001 — any parse trouble
+        pass
+    _PROPS_CACHE[key] = (tag_score, bitrate)
+    return tag_score, bitrate
+
+
+def _quality(fp):
+    """(format class, tag richness, bitrate-or-size, size): lossless beats
+    lossy, then the better-tagged file, then the higher bitrate (lossy) or
+    the bigger file (lossless / no mutagen). No audio is decoded — headers
+    and tags only."""
+    try:
+        size = os.lstat(fp).st_size
+    except OSError:
+        size = 0
+    rank = format_rank(fp)
+    tag_score, bitrate = _read_props(fp)
+    effective = bitrate if bitrate > 0 else size
+    return (rank, tag_score, effective, size)
 
 
 def _audio_live(root):
@@ -167,9 +206,15 @@ def _group_songs(files, hashes):
 
 def _keep_best(files):
     """The one file to keep from a same-song group: lossless first, then
-    bigger, then path order (deterministic)."""
+    better-tagged, then higher bitrate / bigger, then path order."""
     return sorted(files, key=lambda f: (-_quality(f)[0], -_quality(f)[1],
-                                        f))[0]
+                                        -_quality(f)[2], f))[0]
+
+
+def _clean_name(name):
+    """Filename without brenda's collision tag — final collections should
+    never carry '(merged 1)' plumbing in their names."""
+    return frm.MERGE_TAG.sub("", name).strip() or name
 
 
 def _dirs_left_empty(root, removed_files):
@@ -402,8 +447,10 @@ def plan_import(run_dir, collection_path, target, move=False):
             planned.add(dst)
     for f in leftovers:
         rel = os.path.relpath(f, collection_path)
-        dst = _collision_free(os.path.join(target, rel), "imported",
-                              planned=planned)
+        # imports land under clean names — merge tags never travel home
+        dst = _collision_free(os.path.join(
+            target, os.path.dirname(rel), _clean_name(os.path.basename(f))),
+            "imported", planned=planned)
         ops.append({"op": op_kind, "src": f, "dst": dst,
                     "why": "new to you"})
         planned.add(dst)
@@ -491,9 +538,20 @@ def plan_variants(run_dir, collection_path):
             continue
         n_songs += 1
         keeper = _keep_best(grp)
-        for worse in grp:
-            if worse == keeper:
-                continue
+        losers = [f for f in grp if f != keeper]
+        # the winner must not carry merge-tag plumbing into the final
+        # collection: after the losers vacate, it takes the clean name
+        base = os.path.basename(keeper)
+        clean_base = _clean_name(base)
+        rename_dst = None
+        if clean_base != base:
+            cand = os.path.join(os.path.dirname(keeper), clean_base)
+            if cand not in planned and (not os.path.exists(cand)
+                                        or cand in set(losers)):
+                rename_dst = cand
+                planned.add(rename_dst)
+        keeper_final = rename_dst or keeper
+        for worse in losers:
             rel = os.path.relpath(worse, collection_path)
             dst = _collision_free(os.path.join(q_root, rel), planned=planned)
             planned.add(dst)
@@ -502,10 +560,13 @@ def plan_variants(run_dir, collection_path):
             except OSError:
                 pass
             ops.append({"op": "move", "src": worse, "dst": dst,
-                        "keeper": keeper,
+                        "keeper": keeper_final,
                         "why": f"same song, lesser version — kept "
-                               f"{os.path.basename(keeper)}"})
-    moved = {o["src"] for o in ops}
+                               f"{os.path.basename(keeper_final)}"})
+        if rename_dst:
+            ops.append({"op": "move", "src": keeper, "dst": rename_dst,
+                        "why": "clean name — merge tag stripped"})
+    moved = {o["src"] for o in ops if o.get("keeper")}
     dirs = _dirs_left_empty(collection_path, moved)
     for d in dirs:
         ops.append({"op": "rmdir", "src": d, "why": "emptied by variants"})
@@ -519,9 +580,11 @@ def plan_variants(run_dir, collection_path):
             "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "status": "planned",
             "notes": ["one copy per song: lossless > opus/ogg > m4a/aac > "
-                      "mp3, then the bigger file; matching is filename-based "
-                      "(artist folder + title, format-blind) — undo if a "
-                      "call is wrong"]}
+                      "mp3, then tag richness, then bitrate/size (tag "
+                      "headers only — no audio decoded); matching is "
+                      "filename-based (artist folder + title, format-blind) "
+                      "— undo if a call is wrong; winners with '(merged N)' "
+                      "names are renamed clean"]}
     _journal("planned", plan)
     _save(plan)
     return plan
@@ -719,6 +782,12 @@ def plan_merge(run_dir, primary_path, copy_path):
                     return True
         return False
 
+    def internally_varied(base):
+        """True when the subtree itself holds 2+ versions of a song —
+        a whole-dir move would smuggle the duplicates into the primary."""
+        audio_b = [f for f in live_audio if f.startswith(base + os.sep)]
+        return any(len(g) > 1 for g in _group_songs(audio_b, hashes))
+
     ops = []
     n_q = n_m = n_dirs = n_swap = n_vq = 0
     moved_roots = []                   # artist/album dirs gone wholesale
@@ -739,6 +808,7 @@ def plan_merge(run_dir, primary_path, copy_path):
         junk_a = _subtree_junk(adir, live)
         if audio_a and not any(f in twins for f in audio_a) and not junk_a \
                 and not has_primary_variant(adir) \
+                and not internally_varied(adir) \
                 and not os.path.exists(os.path.join(primary_path, a)) \
                 and os.path.join(primary_path, a) not in planned:
             ops.append({"op": "move_dir", "src": adir,
@@ -756,6 +826,7 @@ def plan_merge(run_dir, primary_path, copy_path):
             junk_al = _subtree_junk(aldir, live)
             if audio_al and not any(f in twins for f in audio_al) and not junk_al \
                     and not has_primary_variant(aldir) \
+                    and not internally_varied(aldir) \
                     and not os.path.exists(os.path.join(primary_path, a, alb)) \
                     and os.path.join(primary_path, a, alb) not in planned:
                 ops.append({"op": "move_dir", "src": aldir,
@@ -795,9 +866,25 @@ def plan_merge(run_dir, primary_path, copy_path):
         if k and k in primary_by_key:
             p_best = _keep_best(primary_by_key[k])
             if _quality(best_src) > _quality(p_best):
+                # swap: the primary's copy is quarantined FIRST, then the
+                # better version takes its (clean) slot — merge tags never
+                # survive into the final collection
                 rel = os.path.relpath(best_src, copy_path)
-                dst = _collision_free(os.path.join(primary_path, rel),
-                                      planned=planned)
+                dst_dir = os.path.join(primary_path, os.path.dirname(rel))
+                dst = os.path.join(dst_dir, _clean_name(os.path.basename(
+                    best_src)))
+                if dst in planned:
+                    dst = _collision_free(dst, planned=planned)
+                qdst = _collision_free(os.path.join(q_root, "replaced",
+                                                    os.path.basename(p_best)),
+                                       planned=planned)
+                ops.append({"op": "move", "src": p_best, "dst": qdst,
+                            "keeper": dst,
+                            "if_src": best_src,
+                            "why": "replaced by a better version of the "
+                                   "same song"})
+                planned.add(qdst)
+                n_q += 1
                 ops.append({"op": "move", "src": best_src, "dst": dst,
                             "why": f"better version of a song the primary "
                                    f"has ({os.path.basename(p_best)})"})
@@ -805,16 +892,6 @@ def plan_merge(run_dir, primary_path, copy_path):
                 keeper_dst = dst
                 n_m += 1
                 n_swap += 1
-                qdst = _collision_free(os.path.join(q_root, "replaced",
-                                                    os.path.basename(p_best)),
-                                       planned=planned)
-                ops.append({"op": "move", "src": p_best, "dst": qdst,
-                            "keeper": dst,
-                            "if_src": best_src, "if_dst": dst,
-                            "why": "replaced by a better version of the "
-                                   "same song"})
-                planned.add(qdst)
-                n_q += 1
             else:
                 qdst = _collision_free(os.path.join(q_root, "variants",
                                                     os.path.basename(best_src)),
@@ -1610,8 +1687,10 @@ def self_test():
               and plan8["counts"]["variants_quarantined"] == 1)
         apply_plan(plan8)
         landed = set(os.listdir(os.path.join(a, "Unknown")))
-        check("best version landed under the renamed slot, none lost",
-              landed == {"Song (merged 1).mp3", "Third.mp3"})
+        check("better version took the CLEAN slot, no merge tags kept",
+              landed == {"Song.mp3", "Third.mp3"}
+              and open(os.path.join(a, "Unknown", "Song.mp3"),
+                       "rb").read() == b"V1" * 50)
         undo(plan8["id"])
         check("undo follows the swapped/renamed destinations",
               os.path.isfile(os.path.join(c5, "Unknown", "Song.mp3"))
@@ -1621,9 +1700,9 @@ def self_test():
 
         # --- apply-time collision: drive changed between plan and apply -----
         plan9 = plan_merge(rundir5, a, c5)
-        # sneak a file into the planned destination after planning
-        open(os.path.join(a, "Unknown", "Song (merged 1).mp3"), "wb").write(
-            b"SNEAK")
+        # sneak a file into a planned destination after planning — the
+        # apply-time safety net must rename around it, never overwrite
+        open(os.path.join(a, "Unknown", "Third.mp3"), "wb").write(b"SNEAK")
         apply_plan(plan9)
         check("apply-time collisions renamed instead of erroring",
               plan9["result"]["errors"] == []
@@ -1632,12 +1711,11 @@ def self_test():
                          if o.get("keeper") and o["op"] == "move"
                          and o["dst"].startswith(quarantine_root())
                          and os.path.isfile(o["dst"]))
-        check("keepers were refreshed to the renamed destinations",
+        check("keepers point at files that really exist after apply",
               keepers_ok)
         undo(plan9["id"])
-        sneak_path = os.path.join(a, "Unknown", "Song (merged 1).mp3")
-        sneak_ok = os.path.isfile(sneak_path) \
-            and open(sneak_path, "rb").read() == b"SNEAK"
+        sneak_ok = open(os.path.join(a, "Unknown", "Third.mp3"),
+                        "rb").read() == b"SNEAK"
         check("undo does not touch the pre-existing sneaky file", sneak_ok)
 
         # --- variants: keep best per song (one copy per song) ---------------
