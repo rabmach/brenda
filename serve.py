@@ -331,6 +331,16 @@ form{{display:inline;margin:0}}
 .mnt{{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:700;
 text-transform:uppercase;letter-spacing:.03em}}
 .acts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:8px;margin:8px 0}}
+.collbox{{background:var(--card2);border:1px solid var(--line);border-radius:12px;
+padding:12px;margin:16px 0}}
+.collbox table{{background:transparent}}
+.collbox th{{background:transparent;font-size:13px}}
+.collbox .act,.collbox .evline{{background:var(--card)}}
+table.coll{{font-size:16px;line-height:1.45}}
+table.coll th{{font-size:13px;letter-spacing:.04em}}
+table.coll td code{{font-size:15px}}
+table.coll td,table.coll th{{padding:9px 12px}}
+
 .act{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px}}
 .act form{{display:flex;flex-wrap:wrap;gap:6px;align-items:center}}
 .act form button{{flex:1 1 auto;white-space:nowrap}}
@@ -425,7 +435,7 @@ def _collection_block(run, c, coll_pairs, show_nums=True, events=None):
     to this collection."""
     nums = _coll_compare(run, c["path"])
     new_n = nums[2] if nums else 0
-    head = ("<table><tr>"
+    head = ('<table class="coll"><tr>'
             "<th>collection</th><th>what it is</th>"
             "<th class='num'>audio</th><th class='num'>size</th>"
             "<th class='num' title='zips, docs, unknown files — brenda never "
@@ -456,8 +466,9 @@ def _collection_block(run, c, coll_pairs, show_nums=True, events=None):
                     'Re-scan the drive to refresh the listing.</div>')
     for line in (events or {}).get(c["path"], []):
         ev_html += f'<div class="evline">{frm.esc(line)}</div>'
-    return (head + ev_html
-            + f'<div class="acts">{_action_forms(run, c, new_n, coll_pairs)}</div>')
+    return ('<div class="collbox">' + head + ev_html
+            + f'<div class="acts">{_action_forms(run, c, new_n, coll_pairs)}</div>'
+            + '</div>')
 
 
 # --------------------------------------------------------------------------
