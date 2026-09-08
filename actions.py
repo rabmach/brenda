@@ -1024,9 +1024,14 @@ def apply_plan(plan):
                 if os.path.exists(dst):
                     # safety net: the drive changed since the plan (another
                     # op, another session). Rename instead of losing the op —
-                    # the manifest's dst is updated so undo follows it.
+                    # the manifest's dst is updated so undo follows it, and
+                    # any keeper pointing at the old name follows too.
+                    old = dst
                     dst = _collision_free(dst)
                     op["dst"] = dst
+                    for other in plan["ops"]:
+                        if other.get("keeper") == old:
+                            other["keeper"] = dst
                     renamed += 1
                 shutil.move(src, dst)
             elif kind == "copy_dir":
@@ -1042,8 +1047,12 @@ def apply_plan(plan):
                     continue
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 if os.path.exists(dst):
+                    old = dst
                     dst = _collision_free(dst)
                     op["dst"] = dst
+                    for other in plan["ops"]:
+                        if other.get("keeper") == old:
+                            other["keeper"] = dst
                     renamed += 1
                 shutil.move(src, dst)
             elif kind == "delete_dir":
@@ -1595,17 +1604,14 @@ def self_test():
         os.makedirs(rundir5)
         frm.export_run(data, drive, rundir5)
         plan8 = plan_merge(rundir5, a, c5)
-        dsts = sorted(o["dst"] for o in plan8["ops"]
-                      if o["op"] == "move"
-                      and "Song" in os.path.basename(o["dst"])
-                      and o["dst"].startswith(a))
-        check("same-name sources get DISTINCT planned destinations",
-              len(dsts) == 2 and len(set(dsts)) == 2)
+        check("merge-tag file groups with its plain sibling (one variant "
+              "swap, one group-worse quarantine)",
+              plan8["counts"]["variants_kept"] == 1
+              and plan8["counts"]["variants_quarantined"] == 1)
         apply_plan(plan8)
         landed = set(os.listdir(os.path.join(a, "Unknown")))
-        check("variant swap + rename collision: nothing lost, distinct slots",
-              landed == {"Song (merged 1).mp3", "Song (merged 2).mp3",
-                         "Third.mp3"})
+        check("best version landed under the renamed slot, none lost",
+              landed == {"Song (merged 1).mp3", "Third.mp3"})
         undo(plan8["id"])
         check("undo follows the swapped/renamed destinations",
               os.path.isfile(os.path.join(c5, "Unknown", "Song.mp3"))
@@ -1622,6 +1628,12 @@ def self_test():
         check("apply-time collisions renamed instead of erroring",
               plan9["result"]["errors"] == []
               and any("renamed on collision" in n for n in plan9["notes"]))
+        keepers_ok = all(os.path.isfile(o["keeper"]) for o in plan9["ops"]
+                         if o.get("keeper") and o["op"] == "move"
+                         and o["dst"].startswith(quarantine_root())
+                         and os.path.isfile(o["dst"]))
+        check("keepers were refreshed to the renamed destinations",
+              keepers_ok)
         undo(plan9["id"])
         sneak_path = os.path.join(a, "Unknown", "Song (merged 1).mp3")
         sneak_ok = os.path.isfile(sneak_path) \

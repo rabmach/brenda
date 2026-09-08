@@ -129,6 +129,9 @@ KIND_COLOR = {
 TRACK_LEAD = re.compile(
     r"^(?:(?:cd|disc|disk)\s*\d{1,3}\s*[-_.]?\s*)?\d{1,3}\s*[-_.]\s*", re.I)
 TRACK_WORD = re.compile(r"^(?:track)\s*\d{1,3}\s*[-_.]?\s*", re.I)
+# brenda's own collision renames ("Song (merged 1).mp3") must not make a
+# copy look like a different song — strip the tag before normalizing
+MERGE_TAG = re.compile(r"\s*\(\s*(?:merged|imported)\s*\d+\s*\)\s*$", re.I)
 SEP = re.compile(r"[\s_.\-]+")
 NONALNUM = re.compile(r"[^a-z0-9 ]")
 
@@ -445,6 +448,7 @@ def norm_name(name):
     n = os.path.splitext(name)[0]
     n = TRACK_LEAD.sub("", n)
     n = TRACK_WORD.sub("", n)
+    n = MERGE_TAG.sub("", n)
     n = n.lower()
     n = SEP.sub(" ", n)
     n = NONALNUM.sub("", n)
