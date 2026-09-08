@@ -317,12 +317,14 @@ def _page(title, body, refresh=0):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{frm.esc(title)}</title>
 <style>{frm.CSS}
+button:active{{transform:translateY(1px);filter:brightness(1.3)}}
 .bar{{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0}}
 .bar input[type=text]{{flex:1;min-width:260px;background:var(--card2);
 color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:14px}}
 button,select{{background:var(--card2);color:var(--txt);
 border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px;cursor:pointer}}
 button:hover{{border-color:var(--acc)}}
+button:active{{transform:translateY(1px);filter:brightness(1.3)}}
 button.warn{{background:#4a2323;border-color:#7a3030}}
 button.go{{background:#1d3a4a;border-color:#2b6a8f}}
 form{{display:inline;margin:0}}
@@ -355,6 +357,15 @@ summary{{cursor:pointer;color:var(--dim)}}
 .flash{{background:#1d3a4a;border:1px solid #2b6a8f;border-radius:8px;
 padding:10px 14px;margin:10px 0}}
 </style></head><body><div class="wrap">{body}
+<script>
+document.addEventListener("submit",function(e){{
+  var b=e.target.querySelector('button[type=submit]');
+  if(!b)return;
+  var t=b.textContent;
+  setTimeout(function(){{b.disabled=true;b.textContent="working...";}},0);
+  setTimeout(function(){{b.disabled=false;b.textContent=t;}},4000);
+}},false);
+</script>
 <footer>brenda serve — localhost only, token-gated. refresh: {frm.esc(datetime.datetime.now().strftime("%H:%M:%S"))}</footer>
 </div></body></html>"""
 
