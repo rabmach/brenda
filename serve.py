@@ -439,10 +439,16 @@ def _action_forms(run, c, new_n, coll_pairs):
   <select name="primary">{''.join(f'<option value="{frm.esc(p)}">{frm.esc(l)}</option>' for p, l in coll_pairs if p != c["path"])}</select>
   <button {disabled}type="submit">merge &rarr;</button></form></div>
  <div class="act"><form method="post" action="/{t}/plan/quarantine" onsubmit="return confirm('Plan quarantine of this collection? The directory MOVES off the drive into brenda quarantine on your LOCAL disk — reviewable, undo moves it back, nothing is deleted.')">
+  <input type="hidden" name="run" value="{frm.esc(rid)}">
+  <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
   <button {disabled}class="warn" type="submit">quarantine &rarr; review folder</button></form></div>
  <div class="act"><form method="post" action="/{t}/plan/variants" onsubmit="return confirm('Plan variant cleanup of THIS collection? One copy per song: lossless beats lossy, then the bigger file. Extra versions move to quarantine — undoable, and purge only works while the kept version exists.')">
+  <input type="hidden" name="run" value="{frm.esc(rid)}">
+  <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
   <button {disabled}type="submit">variants — keep best per song</button></form></div>
  <div class="act"><form method="post" action="/{t}/plan/delete" onsubmit="return confirm('Plan DELETE of {short}? brenda first verifies every music file here still exists elsewhere; non-music files (art/playlists/zips) go too. PERMANENT — no undo.')">
+  <input type="hidden" name="run" value="{frm.esc(rid)}">
+  <input type="hidden" name="collection" value="{frm.esc(c['path'])}">
   <button {disabled}class="warn" type="submit">delete: {short} — verified</button></form></div>"""
 
 
@@ -1521,6 +1527,24 @@ def self_test():
         post("/undo", {"id": pid})
         check("undo removed the import",
               not os.path.exists(os.path.join(tmp, "imp", "Alpha")))
+
+        # every card form posts with its hidden run/collection fields: a
+        # missing field is KeyError 'run' - the bug the button-grid rewrite
+        # planted and a real variants click caught
+        code, html = post("/plan/variants",
+                          {"run": "testdrive", "collection": coll})
+        check("variants route intact (no missing-field error)",
+              "FAILED: 'run'" not in html
+              and "no multi-version songs" in html)
+        code, html = post("/plan/quarantine",
+                          {"run": "testdrive", "collection": coll})
+        check("quarantine route intact", "FAILED: 'run'" not in html)
+        acts = actions.list_actions(1)
+        if acts and acts[0]["status"] == "planned":
+            post("/cancel", {"id": acts[0]["id"]})
+        code, html = post("/plan/delete",
+                          {"run": "testdrive", "collection": coll})
+        check("delete route intact", "FAILED: 'run'" not in html)
 
         code, js = get("/actions")
         check("actions JSON live", code == 200
