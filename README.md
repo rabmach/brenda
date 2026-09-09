@@ -31,6 +31,9 @@ wins its slot). BPM is cached by content hash, so file moves never invalidate
 it, and v1.1's planned import buttons close the loop: import a new track
 locally, re-dig, and its playlist path flips from the drive to home. |
 
+![report](2026-09-02_1920x1080_10:33:08.jpg)
+
+
 The scanner inside brenda is **frm** (Find Redundant Music), and brenda
 answers to that name too: everything `frm` did before still works —
 `frm --open`, `frm --list-drives`, `frm /media/... --no-dedup`, the lot.
