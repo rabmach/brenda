@@ -118,48 +118,64 @@ _PROPS_CACHE = {}
 
 
 def _read_props(fp):
-    """(tag richness, bitrate) via mutagen — headers only, no audio decode.
-    Cached per (path, size, mtime). (0, 0) when unreadable or mutagen is
-    absent; ranking then falls back to format + size."""
+    """(tag richness, bitrate, embedded art) via mutagen — headers and tag
+    blocks only, no audio decode. Cached per (path, size, mtime).
+    (0, 0, 0) when unreadable or mutagen is absent; ranking then falls
+    back to format + size. Embedded-cover detection works across the
+    formats (id3 APIC, flac picture blocks, ogg metadata_block_picture,
+    m4a covr)."""
     try:
         st = os.lstat(fp)
         key = (fp, st.st_size, st.st_mtime)
     except OSError:
-        return 0, 0
+        return 0, 0, 0
     if key in _PROPS_CACHE:
         return _PROPS_CACHE[key]
     tag_score = 0
     bitrate = 0
+    art = 0
     try:
         import mutagen
-        m = mutagen.File(fp, easy=True)
+        m = mutagen.File(fp)
         if m is not None:
-            if m.tags:
-                for vals in m.tags.values():
-                    if isinstance(vals, list) and any(str(v).strip()
-                                                      for v in vals):
-                        tag_score += 1
-            info = getattr(m, "info", None)
-            bitrate = int(getattr(info, "bitrate", 0) or 0)
+            tags = m.tags
+            if tags is not None:
+                try:
+                    items = list(tags.items()) if hasattr(tags, "items") else []
+                except Exception:        # noqa: BLE001
+                    items = []
+                for k, vals in items:
+                    vlist = vals if isinstance(vals, list) else [vals]
+                    if not any(str(v).strip() for v in vlist):
+                        continue
+                    tag_score += 1
+                    low = str(k).lower()
+                    if ("cover" in low or "picture" in low
+                            or "covr" in low or low.startswith("apic")):
+                        art = 1
+            if getattr(m, "pictures", None):        # flac / ape picture blocks
+                art = 1
+            bitrate = int(getattr(getattr(m, "info", None), "bitrate", 0) or 0)
     except Exception:                        # noqa: BLE001 — any parse trouble
         pass
-    _PROPS_CACHE[key] = (tag_score, bitrate)
-    return tag_score, bitrate
+    _PROPS_CACHE[key] = (tag_score, bitrate, art)
+    return tag_score, bitrate, art
 
 
 def _quality(fp):
-    """(format class, tag richness, bitrate-or-size, size): lossless beats
-    lossy, then the better-tagged file, then the higher bitrate (lossy) or
-    the bigger file (lossless / no mutagen). No audio is decoded — headers
-    and tags only."""
+    """(format class, bitrate-or-size, embedded-cover, tag richness, size):
+    lossless beats lossy, then the better-sounding encode (bitrate for
+    lossy, size for lossless), then a file whose cover art is embedded,
+    then the better-tagged one. No audio is decoded — headers and tag
+    blocks only."""
     try:
         size = os.lstat(fp).st_size
     except OSError:
         size = 0
     rank = format_rank(fp)
-    tag_score, bitrate = _read_props(fp)
+    tag_score, bitrate, art = _read_props(fp)
     effective = bitrate if bitrate > 0 else size
-    return (rank, tag_score, effective, size)
+    return (rank, effective, art, tag_score, size)
 
 
 def _audio_live(root):
@@ -206,9 +222,10 @@ def _group_songs(files, hashes):
 
 def _keep_best(files):
     """The one file to keep from a same-song group: lossless first, then
-    better-tagged, then higher bitrate / bigger, then path order."""
-    return sorted(files, key=lambda f: (-_quality(f)[0], -_quality(f)[1],
-                                        -_quality(f)[2], f))[0]
+    the better-sounding encode (bitrate for lossy, size for lossless),
+    then embedded-cover presence, then tag richness, then path order."""
+    return sorted(files, key=lambda f: tuple(-x for x in _quality(f)[:4])
+                  + (f,))[0]
 
 
 def _clean_name(name):
@@ -613,8 +630,9 @@ def plan_variants(run_dir, collection_path):
             "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "status": "planned",
             "notes": ["one copy per song: lossless > opus/ogg > m4a/aac > "
-                      "mp3, then tag richness, then bitrate/size (tag "
-                      "headers only — no audio decoded); matching is "
+                      "mp3, then bitrate/size, then embedded cover, then "
+                      "tag richness (headers only — no audio decoded); "
+                      "matching is "
                       "filename-based (artist folder + title, format-blind) "
                       "— undo if a call is wrong; winners with '(merged N)' "
                       "names are renamed clean"]}
