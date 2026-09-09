@@ -3,7 +3,7 @@
 **Find redundant music, compare drives, dig playlists.** Read-only triage for
 the boxes where music actually lives.
 
-![handy action](2026-09-08_1920x1080_17:42:44.jpg)
+![handy action](https://github.com/rabmach/brenda/blob/main/2026-09-08_1920x1080_17%3A42%3A44.jpg)
 
 
 If you are like me you keep piling backup upon backup to an external drive and you end up with a bunch of redundancy. After restoring my system (see DORiS) I wanted my music back and there was quite a mess on my dump drive. brenda came out of that: find all that music (and it only looks in music directories) and do something with it.
