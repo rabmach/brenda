@@ -44,7 +44,11 @@ import frm
 
 class State:
     def __init__(self):
+        # token persists across server restarts (saved with the target) so
+        # a running browser tab survives a reboot of the dashboard — no
+        # more minting URLs that orphan your tabs into 404s after restart
         self.token = secrets.token_hex(16)
+        self.port = None
         self.url = None
         self.busy = threading.Lock()
         # live background-job status, shown as a banner on the dashboard:
@@ -59,6 +63,10 @@ class State:
             with open(state_file, encoding="utf-8") as f:
                 d = json.load(f)
             self.target = d.get("target", self.target)
+            if d.get("token"):
+                self.token = d["token"]
+            if d.get("port"):
+                self.port = int(d["port"])
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -75,10 +83,13 @@ class State:
                            last_at=datetime.datetime.now().strftime("%H:%M:%S"))
 
     def save(self):
-        """Persist target + live URL (chmod 600 — the URL carries the token)."""
+        """Persist target + the live URL INCLUDING the token and port
+        (chmod 600 — the URL carries the token). The token + port persist
+        across restarts so browser tabs keep working."""
         try:
             with open(self._state_file, "w", encoding="utf-8", newline="\n") as f:
-                json.dump({"target": self.target, "url": self.url}, f)
+                json.dump({"target": self.target, "url": self.url,
+                           "token": self.token, "port": self.port}, f)
             os.chmod(self._state_file, 0o600)
         except OSError:
             pass
@@ -357,6 +368,9 @@ details{{margin:6px 0}}
 summary{{cursor:pointer;color:var(--dim)}}
 .flash{{background:#1d3a4a;border:1px solid #2b6a8f;border-radius:8px;
 padding:10px 14px;margin:10px 0}}
+details.oldrun>summary{{color:var(--dim);font-size:14px;padding:6px 0}}
+details.oldrun{{border:1px solid var(--line);border-radius:8px;padding:4px 10px;
+background:var(--card2);opacity:.75}}
 </style></head><body><div class="wrap">{body}
 <script>
 document.addEventListener("submit",function(e){{
@@ -885,20 +899,24 @@ def dashboard(msg=""):
 
     events = _collection_events()
     first_report_shown = False
+    worked_on = {a.get("run") for a in actions.list_actions(50)
+                 if a.get("status") == "applied"}
+    seen_roots = set()
     for r in runs:
         rid = r["id"]
         mnt = ('<span class="mnt badge-ok">mounted</span>' if r["mounted"]
                else '<span class="mnt badge-off">unplugged</span>')
-        parts.append(f"<h2>{frm.esc(os.path.basename(r['root']))}"
-                     f" <small class='dim'>{frm.esc(r['root'])} · scanned {frm.esc(r['time'])}</small> {mnt}"
-                     f" <small><a href='report/{frm.esc(rid)}'>full report</a></small></h2>")
+        run_parts = []
+        run_parts.append(f"<h2>{frm.esc(os.path.basename(r['root']))}"
+                         f" <small class='dim'>{frm.esc(r['root'])} · scanned {frm.esc(r['time'])}</small> {mnt}"
+                         f" <small><a href='report/{frm.esc(rid)}'>full report</a></small></h2>")
         if r["compare"]:
             roots = r["compare"].get("meta", {}).get("index_roots", [])
             pretty = ", ".join(
                 "~" if os.path.expanduser("~") == rr else rr for rr in roots)
-            parts.append(f'<p class="sub">the compare numbers below are '
-                         f'against: <b>{frm.esc(pretty or "everything indexed")}'
-                         f'</b> — use "compare to …" above to change that</p>')
+            run_parts.append(f'<p class="sub">the compare numbers below are '
+                             f'against: <b>{frm.esc(pretty or "everything indexed")}'
+                             f'</b> — use "compare to …" above to change that</p>')
         if not r["compare"] or not r["fresh"]:
             against_opts = ['<option value="">everything indexed</option>',
                             '<option value="__home__">the local home dir</option>']
@@ -907,7 +925,7 @@ def dashboard(msg=""):
                     against_opts.append(
                         f'<option value="{frm.esc(other["root"])}">'
                         f'{frm.esc(os.path.basename(other["root"]))} scan</option>')
-            parts.append(f"""
+            run_parts.append(f"""
 <form method="post" action="compare">
 <p class="sub">no compare results yet (or older than the report).
 {'<span class="dim"> — drive can stay unplugged: cached indexes carry over</span>' if not r["mounted"] else ''}
@@ -923,16 +941,35 @@ def dashboard(msg=""):
             except (OSError, json.JSONDecodeError):
                 ov = None
         for c in _collections(r):
-            parts.append(_collection_block(r, c, coll_pairs, events=events,
-                                           overlay=ov))
+            run_parts.append(_collection_block(r, c, coll_pairs, events=events,
+                                               overlay=ov))
         inner = _report_inner(r["dir"])
         if inner:
             open_tag = " open" if not first_report_shown else ""
             first_report_shown = True
-            parts.append(f"<details{open_tag}>"
-                         f"<summary>report — every Music directory found on "
-                         f"this drive (full detail, fold away)</summary>"
-                         f"{inner}</details>")
+            run_parts.append(f"<details{open_tag}>"
+                             f"<summary>report — every Music directory found on "
+                             f"this drive (full detail, fold away)</summary>"
+                             f"{inner}</details>")
+
+        # fold runs you've acted on, and runs superseded by a newer scan of
+        # the same drive — loading the page shows what is CURRENT
+        superseded = r["root"] in seen_roots
+        seen_roots.add(r["root"])
+        if r["dir"] in worked_on or superseded:
+            colls = _collections(r)
+            n_audio = sum(c["audio"] for c in colls)
+            why = ("actions were performed on its collections"
+                   if r["dir"] in worked_on else
+                   f"superseded by a newer scan of {frm.esc(os.path.basename(r['root']))}")
+            summary = (f"<b>{frm.esc(os.path.basename(r['root']))}</b>"
+                       f" <small class='dim'>· scanned {frm.esc(r['time'])} · "
+                       f"{len(colls)} collection(s), {n_audio:,} audio at "
+                       f"scan time · {why}</small> {mnt}")
+            parts.append(f"<details class='oldrun'><summary>{summary}"
+                         f"</summary>{''.join(run_parts)}</details>")
+        else:
+            parts.extend(run_parts)
 
     dedupe_opts = _opts([(r["id"], os.path.basename(r["root"]) + " — " + r["id"])
                          for r in runs])
@@ -1520,7 +1557,16 @@ def serve(port=None, no_open=False):
     s.bind(("127.0.0.1", 0))
     free = s.getsockname()[1]
     s.close()
-    port = port or free
+    # same port across restarts when it's free — the saved URL keeps working
+    # in every browser tab, forever
+    port = STATE.port or free
+    busy_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        busy_probe.bind(("127.0.0.1", port))
+    except OSError:
+        port = free                    # taken (another serve?) — fall back
+    finally:
+        busy_probe.close()
     SERVER = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     with open(pidfile, "w", encoding="utf-8", newline="\n") as f:
         f.write(str(os.getpid()))
