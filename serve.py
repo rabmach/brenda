@@ -704,19 +704,32 @@ def _plan_details(plan):
     is keeping, and the lesser versions it would quarantine."""
     ops = plan.get("ops", [])
     vh = _variants_plan_html(plan, limit=4)
+    if plan["status"] not in ("planned", "applying"):
+        # finished business: a compact line, not live file inspections —
+        # keeper files on unmounted/purged drives must never flash
+        # gone-notes here
+        return ("<details><summary class='dim'>carried out — "
+                f"{frm.esc(plan['status'])} (details in the journal)</summary>"
+                f"<ul style='padding-left:18px'>"
+                f"<li class='dim'>{frm.esc(_describe_plan(plan))}</li></ul>"
+                f"</details>")
+    vh = _variants_plan_html(plan, limit=4)
     if vh:
         return (f"<details><summary class='dim'>see the plan — keepers and "
                 f"removes</summary>{vh}</details>")
-    shown = ops[:6]
-    lis = "".join(
-        f"<li><code>{frm.esc(o['op'])}</code> "
-        f"<code>{frm.esc(o.get('src', ''))}</code> &rarr; "
-        f"<code>{frm.esc(o.get('dst', o.get('why', '')))}</code></li>"
-        for o in shown)
-    more = (f"<li class='dim'>… {len(ops) - len(shown)} more</li>"
-            if len(ops) > len(shown) else "")
-    return (f"<details><summary class='dim'>see the exact plan</summary>"
-            f"<ul style='padding-left:18px'>{lis}{more}</ul></details>")
+    if plan["status"] in ("planned", "applying", "applied"):
+        shown = ops[:6]
+        lis = "".join(
+            f"<li><code>{frm.esc(o['op'])}</code> "
+            f"<code>{frm.esc(o.get('src', ''))}</code> &rarr; "
+            f"<code>{frm.esc(o.get('dst', o.get('why', '')))}</code></li>"
+            for o in shown)
+        more = (f"<li class='dim'>… {len(ops) - len(shown)} more</li>"
+                if len(ops) > len(shown) else "")
+        return (f"<details><summary class='dim'>see the exact plan</summary>"
+                f"<ul style='padding-left:18px'>{lis}{more}</ul></details>")
+    return (f"<ul style='padding-left:18px'>"
+            f"<li class='dim'>{frm.esc(_describe_plan(plan))}</li></ul>")
 
 
 def _actions_section():
