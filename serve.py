@@ -629,10 +629,68 @@ def _purge_label(plan):
     return os.path.basename(root.rstrip(os.sep)) or "drive"
 
 
+def _variants_groups(plan):
+    """For a variants plan: group its quarantine ops by keeper, yielding
+    (keeper, [removed...]) pairs sorted by keeper path — the plain-words
+    answer to 'what is brenda keeping?'."""
+    groups = {}
+    order = []
+    for op in plan.get("ops", []):
+        k = op.get("keeper")
+        if not k:
+            continue
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(op)
+    return [(k, groups[k]) for k in order]
+
+
+def _keeper_line(plan, keeper, removed_ops):
+    """One human row: KEEP this file, with its measured quality, and the
+    list of lesser versions that would be quarantined."""
+    root = plan.get("root") or ""
+    rel = frm.esc(os.path.relpath(keeper, root)) if root else frm.esc(keeper)
+    q = actions._quality(keeper)
+    kinds = {5: "lossless", 4: "ogg", 3: "m4a/aac", 2: "mp3", 1: ""}
+    fmt = kinds.get(q[0], "?")
+    art = "cover art ✓, " if q[2] else ""
+    tags = f"{q[3]} tags" if q[3] else "no tags"
+    bits = f"{fmt} · {q[1]:,} {'kbit/s' if q[0] not in (5,) and q[1] > 0 and q[1] < 1024000 or q[0] in (2,3,4) and q[1] > 8000 else 'bytes'}"
+    removed = "".join(
+        f"<li><code>{frm.esc(os.path.relpath(o.get('src', '?'), root))}</code>"
+        f"</li>" for o in removed_ops)
+    return (f"<div class='evline'><b>KEEP</b> <code>{rel}</code> "
+            f"<small class='dim'>({bits} · {art}{tags} · "
+            f"{frm.fmt_bytes(q[1] if q[0] == 5 else os.path.getsize(keeper))})</small>"
+            f"<ul style='padding-left:14px;margin:4px 0'>{removed}</ul></div>")
+
+
+def _variants_plan_html(plan, limit=10):
+    """Grouped keeper-first rendering of a variants plan."""
+    groups = _variants_groups(plan)
+    if not groups:
+        return ""
+    shown = [_keeper_line(plan, k, group) for k, group in groups[:limit]]
+    more = ""
+    if len(groups) > limit:
+        extra_songs = sum(len(g) for _k, g in groups[limit:])
+        more = (f"<p class='sub'>&#8230; and {len(groups) - limit} more "
+                f"song(s) with their extra versions"
+                f"{f' ({extra_songs} files)' if extra_songs else ''} in the "
+                "same shape.</p>")
+    return "".join(shown) + more
+
+
 def _plan_details(plan):
     """Collapsible first ops, so a plan can be re-inspected later ('what was
-    I about to do again?')."""
+    I about to do again?'). Variants plans render keeper-first: what brenda
+    is keeping, and the lesser versions it would quarantine."""
     ops = plan.get("ops", [])
+    vh = _variants_plan_html(plan, limit=4)
+    if vh:
+        return (f"<details><summary class='dim'>see the plan — keepers and "
+                f"removes</summary>{vh}</details>")
     shown = ops[:6]
     lis = "".join(
         f"<li><code>{frm.esc(o['op'])}</code> "
@@ -863,21 +921,31 @@ def dashboard(msg=""):
 
 
 def confirm_page(plan):
-    """Dry-run preview: the plan, the counts, the first ops, confirm/cancel."""
+    """Dry-run preview: the plan, the counts, the ops (variants plans show
+    keeper-first: what brenda is KEEPING and what it would quarantine),
+    confirm/cancel."""
     ops = plan["ops"]
-    shown = ops[:8]
-    rows = "".join(
-        f"<li><code>{frm.esc(o['op'])}</code> "
-        f"<code>{frm.esc(o.get('src', ''))}</code><br>"
-        f"<span class='dim'>&rarr; <code>{frm.esc(o.get('dst', o.get('why', '')))}</code></span></li>"
-        for o in shown)
-    more = f"<p class='dim'>… and {len(ops) - len(shown)} more</p>" if len(ops) > len(shown) else ""
+    vh = _variants_plan_html(plan, limit=14)
+    if vh:
+        listing = (f"<h4 style='margin-top:14px'>what brenda is "
+                   f"KEEPING</h4>{vh}"
+                   "<p class='sub'>each KEEP lists the lesser versions that "
+                   "would move to quarantine.</p>")
+    else:
+        shown = ops[:8]
+        rows = "".join(
+            f"<li><code>{frm.esc(o['op'])}</code> "
+            f"<code>{frm.esc(o.get('src', ''))}</code><br>"
+            f"<span class='dim'>&rarr; <code>{frm.esc(o.get('dst', o.get('why', '')))}</code></span></li>"
+            for o in shown)
+        more = f"<p class='dim'>… and {len(ops) - len(shown)} more</p>" if len(ops) > len(shown) else ""
+        listing = f"<ul style='padding-left:18px'>{rows}</ul>{more}"
     notes = "".join(f"<p class='warn'>{frm.esc(n)}</p>" for n in plan.get("notes", []))
     body = f"""
 <h1>Confirm: {frm.esc(plan['kind'])} <small class="dim">{frm.esc(plan['id'])}</small></h1>
 <p class="sub">{frm.esc(json.dumps(plan['counts']))} · run {frm.esc(os.path.basename(plan['run']))}</p>
 {notes}
-<ul style="padding-left:18px">{rows}</ul>{more}
+{listing}
 <div class="bar">
  <form method="post" action="apply"><input type="hidden" name="id" value="{frm.esc(plan['id'])}">
   <button class="go" type="submit">apply — {frm.esc(json.dumps(plan['counts']))}</button></form>
