@@ -647,12 +647,12 @@ def _variants_groups(plan):
 
 
 def _keeper_line(plan, keeper, removed_ops):
-    """One human row: KEEP this file, with its measured quality, and the
-    list of lesser versions that would be quarantined. All file probing is
-    defensive — a missing file (drive unplugged, moved since) renders as
-    an honest note, never a crash."""
+    """One human row: KEEP this file — FULL PATH disambiguation (the same
+    song may live under two different artist folders) — with its measured
+    quality, and the full paths of the lesser versions that would be
+    quarantined. All file probing is defensive — a missing file (drive
+    unplugged, moved since) renders as an honest note, never a crash."""
     root = plan.get("root") or ""
-    rel = frm.esc(os.path.relpath(keeper, root)) if root else frm.esc(keeper)
     gone = not os.path.isfile(keeper)
     q = actions._quality(keeper)
     kinds = {5: "lossless", 4: "ogg", 3: "m4a/aac", 2: "mp3", 1: ""}
@@ -669,8 +669,9 @@ def _keeper_line(plan, keeper, removed_ops):
         size_txt = (f" · {frm.fmt_bytes(q[4])}") if q[0] != 5 else ""
         status = f"<small class='dim'>({bits}{size_txt} · {art}{tags})</small>"
     removed = "".join(
-        f"<li><code>{frm.esc(os.path.relpath(o.get('src', '?'), root))}</code>"
+        f"<li><code>{frm.esc(os.path.abspath(o.get('src', '?')))}</code>"
         f"</li>" for o in removed_ops)
+    rel = frm.esc(os.path.abspath(keeper))
     return (f"<div class='evline'><b>KEEP</b> <code>{rel}</code> {status}"
             f"<ul style='padding-left:14px;margin:4px 0'>{removed}</ul></div>")
 
