@@ -657,8 +657,10 @@ def _keeper_line(plan, keeper, removed_ops):
     q = actions._quality(keeper)
     kinds = {5: "lossless", 4: "ogg", 3: "m4a/aac", 2: "mp3", 1: ""}
     fmt = kinds.get(q[0], "?")
-    art = "cover art ✓, " if q[2] else ""
-    tags = f"{q[3]} tags" if q[3] else "no tags"
+    cohesion = (f"its folder holds {q[2]} songs, " if q[2] else
+                "single-track folder, ")
+    art = "cover art ✓, " if q[3] else ""
+    tags = f"{q[4]} tags" if q[4] else "no tags"
     size_txt = ""
     if gone:
         status = ("<small class='warn'>KEEPER FILE GONE — drive unmounted "
@@ -666,7 +668,9 @@ def _keeper_line(plan, keeper, removed_ops):
     else:
         status = ""
         bits = f"{fmt} · {q[1]:,} {'kbit/s' if q[0] not in (5,) and q[1] > 0 and q[1] < 1024000 or q[0] in (2,3,4) and q[1] > 8000 else 'bytes'}"
-        size_txt = (f" · {frm.fmt_bytes(q[4])}") if q[0] != 5 else ""
+        size_txt = (f" · {frm.fmt_bytes(q[5])}") if q[0] != 5 else ""
+        status = (f"<small class='dim'>({bits}{size_txt} · {cohesion}"
+                  f"{art}{tags})</small>")
         status = f"<small class='dim'>({bits}{size_txt} · {art}{tags})</small>"
     removed = "".join(
         f"<li><code>{frm.esc(os.path.abspath(o.get('src', '?')))}</code>"
@@ -862,8 +866,6 @@ def dashboard(msg=""):
  <form method="post" action="target">
   <input type="text" name="target" value="{frm.esc(target)}" title="import target directory">
   <button type="submit">set import target</button></form>
- <form method="post" action="stop" onsubmit="return confirm('Stop the brenda server? (the button starts it again)')">
-  <button class="warn" type="submit">stop server</button></form>
 </div>""")
     parts.append(
         '<p class="sub">Per collection the numbers mean: <b>have</b> = '
@@ -946,6 +948,13 @@ def dashboard(msg=""):
 <select name="run">{dedupe_opts}</select>
 <button class="warn" type="submit" onclick="return confirm('Plan dedupe of this run? (later byte-identical copies quarantined)')">plan dedupe</button></form>{q_btn}
 </div>""")
+
+    # the kill switch lives at the very bottom, far from daily buttons
+    parts.append(f"""
+<h2 style="border-bottom:none">Maintenance</h2>
+<form method="post" action="stop" onsubmit="return confirm('Stop the brenda server? (the button starts it again)')">
+ <button class="warn" type="submit">stop server</button>
+ <small class="dim">stops the dashboard — restart with: brenda serve</small></form>""")
 
     return _page("brenda dashboard", "\n".join(parts), refresh=5)
 

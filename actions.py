@@ -115,6 +115,29 @@ def _song_key(fp):
 
 
 _PROPS_CACHE = {}
+_DIRCOUNT_CACHE = {}
+
+
+def _dir_audio_count(fp):
+    """How many audio files sit in the same directory as fp — the
+    album-cohesion signal: a copy inside a folder that holds MORE of its
+    album beats a souvenir one-track folder, all else equal. Cached per
+    directory (staleness cleared per process; plan runs re-walk anyway)."""
+    d = os.path.dirname(fp)
+    if d in _DIRCOUNT_CACHE:
+        return _DIRCOUNT_CACHE[d]
+    n = 0
+    try:
+        for f in os.listdir(d):
+            if f == os.path.basename(fp):
+                continue
+            if os.path.splitext(f)[1][1:].lower() in (
+                    frm.AUDIO_EXT | {"m4u"}):
+                n += 1
+    except OSError:
+        pass
+    _DIRCOUNT_CACHE[d] = n
+    return n
 
 
 def _read_props(fp):
@@ -163,11 +186,12 @@ def _read_props(fp):
 
 
 def _quality(fp):
-    """(format class, bitrate-or-size, embedded-cover, tag richness, size):
+    """(format class, bitrate-or-size, album cohesion, embedded-cover,
+    tag richness, size):
     lossless beats lossy, then the better-sounding encode (bitrate for
-    lossy, size for lossless), then a file whose cover art is embedded,
-    then the better-tagged one. No audio is decoded — headers and tag
-    blocks only."""
+    lossy, size for lossless), then the copy whose folder holds more of
+    the same album, then a file whose cover art is embedded, then the
+    better-tagged one. No audio is decoded — headers and tag blocks only."""
     try:
         size = os.lstat(fp).st_size
     except OSError:
@@ -175,7 +199,8 @@ def _quality(fp):
     rank = format_rank(fp)
     tag_score, bitrate, art = _read_props(fp)
     effective = bitrate if bitrate > 0 else size
-    return (rank, effective, art, tag_score, size)
+    cohesion = _dir_audio_count(fp)
+    return (rank, effective, cohesion, art, tag_score, size)
 
 
 def _audio_live(root):
@@ -223,8 +248,9 @@ def _group_songs(files, hashes):
 def _keep_best(files):
     """The one file to keep from a same-song group: lossless first, then
     the better-sounding encode (bitrate for lossy, size for lossless),
-    then embedded-cover presence, then tag richness, then path order."""
-    return sorted(files, key=lambda f: tuple(-x for x in _quality(f)[:4])
+    then album cohesion (fuller album dir wins), then embedded-cover
+    presence, then tag richness, then path order."""
+    return sorted(files, key=lambda f: tuple(-x for x in _quality(f)[:5])
                   + (f,))[0]
 
 
@@ -630,9 +656,10 @@ def plan_variants(run_dir, collection_path):
             "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "status": "planned",
             "notes": ["one copy per song: lossless > opus/ogg > m4a/aac > "
-                      "mp3, then bitrate/size, then embedded cover, then "
-                      "tag richness (headers only — no audio decoded); "
-                      "matching is "
+                      "mp3, then bitrate/size, then album cohesion (the "
+                      "copy whose folder holds more of the album), then "
+                      "embedded cover, then tag richness (headers only — "
+                      "no audio decoded); matching is "
                       "filename-based (artist folder + title, format-blind) "
                       "— undo if a call is wrong; winners with '(merged N)' "
                       "names are renamed clean"]}
