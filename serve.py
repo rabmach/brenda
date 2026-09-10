@@ -648,21 +648,30 @@ def _variants_groups(plan):
 
 def _keeper_line(plan, keeper, removed_ops):
     """One human row: KEEP this file, with its measured quality, and the
-    list of lesser versions that would be quarantined."""
+    list of lesser versions that would be quarantined. All file probing is
+    defensive — a missing file (drive unplugged, moved since) renders as
+    an honest note, never a crash."""
     root = plan.get("root") or ""
     rel = frm.esc(os.path.relpath(keeper, root)) if root else frm.esc(keeper)
+    gone = not os.path.isfile(keeper)
     q = actions._quality(keeper)
     kinds = {5: "lossless", 4: "ogg", 3: "m4a/aac", 2: "mp3", 1: ""}
     fmt = kinds.get(q[0], "?")
     art = "cover art ✓, " if q[2] else ""
     tags = f"{q[3]} tags" if q[3] else "no tags"
-    bits = f"{fmt} · {q[1]:,} {'kbit/s' if q[0] not in (5,) and q[1] > 0 and q[1] < 1024000 or q[0] in (2,3,4) and q[1] > 8000 else 'bytes'}"
+    size_txt = ""
+    if gone:
+        status = ("<small class='warn'>KEEPER FILE GONE — drive unmounted "
+                  "or file moved since this plan was made</small>")
+    else:
+        status = ""
+        bits = f"{fmt} · {q[1]:,} {'kbit/s' if q[0] not in (5,) and q[1] > 0 and q[1] < 1024000 or q[0] in (2,3,4) and q[1] > 8000 else 'bytes'}"
+        size_txt = (f" · {frm.fmt_bytes(q[4])}") if q[0] != 5 else ""
+        status = f"<small class='dim'>({bits}{size_txt} · {art}{tags})</small>"
     removed = "".join(
         f"<li><code>{frm.esc(os.path.relpath(o.get('src', '?'), root))}</code>"
         f"</li>" for o in removed_ops)
-    return (f"<div class='evline'><b>KEEP</b> <code>{rel}</code> "
-            f"<small class='dim'>({bits} · {art}{tags} · "
-            f"{frm.fmt_bytes(q[1] if q[0] == 5 else os.path.getsize(keeper))})</small>"
+    return (f"<div class='evline'><b>KEEP</b> <code>{rel}</code> {status}"
             f"<ul style='padding-left:14px;margin:4px 0'>{removed}</ul></div>")
 
 
@@ -671,7 +680,14 @@ def _variants_plan_html(plan, limit=10):
     groups = _variants_groups(plan)
     if not groups:
         return ""
-    shown = [_keeper_line(plan, k, group) for k, group in groups[:limit]]
+    shown = []
+    for k, group in groups[:limit]:
+        try:
+            shown.append(_keeper_line(plan, k, group))
+        except Exception as e:              # noqa: BLE001 — render must live
+            shown.append(f"<div class='evline'>keeper "
+                         f"<code>{frm.esc(os.path.abspath(k))}</code> — "
+                         f"current state: {frm.esc(str(e))}</div>")
     more = ""
     if len(groups) > limit:
         extra_songs = sum(len(g) for _k, g in groups[limit:])
@@ -1054,7 +1070,15 @@ class Handler(BaseHTTPRequestHandler):
         route = parts[2] if len(parts) > 2 else ""
 
         if route == "":
-            self._send(dashboard(q.get("msg", "")))
+            try:
+                self._send(dashboard(q.get("msg", "")))
+            except Exception as e:               # noqa: BLE001 — never blank
+                self._send(_page(
+                    "brenda — hiccup",
+                    f"<h1>the dashboard hiccuped</h1>"
+                    f"<p class='sub'>{frm.esc(str(e))}</p>"
+                    "<p class='sub'>nothing was touched — restart the "
+                    "server and the page comes back.</p>"), code=200)
         elif route == "actions":
             self._json({"actions": actions.list_actions(50)})
         elif route == "report" and len(parts) > 3:
